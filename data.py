@@ -275,7 +275,7 @@ class Adobe5kDataLoader(DataLoader):
 
             for file in files:
 
-                img_id = file.split("-")[0]
+                img_id = os.path.splitext(file)[0]
 
                 is_id_in_list = False
                 for img_id_test in image_ids_list:
