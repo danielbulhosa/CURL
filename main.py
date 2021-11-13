@@ -54,6 +54,7 @@ import os
 import metric
 import model
 import sys
+from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 np.set_printoptions(threshold=sys.maxsize)
 
@@ -226,8 +227,8 @@ def main():
             # train loss
             examples = 0.0
             running_loss = 0.0
-            
-            for batch_num, data in enumerate(training_data_loader, 0):
+
+            for batch_num, data in tqdm(enumerate(training_data_loader, 0), total=len(training_data_loader)):
 
                 input_img_batch, gt_img_batch, category = Variable(data['input_img'],
                                                                        requires_grad=False).cuda(), Variable(data['output_img'],
