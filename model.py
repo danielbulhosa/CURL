@@ -184,15 +184,15 @@ class CURLLoss(nn.Module):
         target_img_batch = target_img_batch
 
         ssim_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1).cuda()))
+            torch.FloatTensor(torch.zeros(1, 1))).cuda()
         l1_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1).cuda()))
+            torch.FloatTensor(torch.zeros(1, 1))).cuda()
         cosine_rgb_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1).cuda()))
+            torch.FloatTensor(torch.zeros(1, 1))).cuda()
         hsv_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1).cuda()))
+            torch.FloatTensor(torch.zeros(1, 1))).cuda()
         rgb_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1).cuda()))
+            torch.FloatTensor(torch.zeros(1, 1))).cuda()
 
         for i in range(0, num_images):
 
