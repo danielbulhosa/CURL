@@ -6,3 +6,4 @@ torchvision==0.8.2
 matplotlib==3.3.2
 imageio==2.9.0
 Pillow>=8.1.2
+tensorboard
