@@ -539,3 +539,14 @@ class CURLNet(nn.Module):
         feat = self.tednet(img)
         img, gradient_regulariser = self.curllayer(feat)
         return img, gradient_regulariser
+
+class CURLGlobalNet(nn.Module):
+
+    def __init__(self):
+        super(CURLGlobalNet, self).__init__()
+        self.final_conv = nn.Conv2d(3, 64, 3, 1, 0, 1)
+        self.refpad = nn.ReflectionPad2d(1)
+        self.curllayer = CURLLayer()
+
+    def forward(self, img):
+        return self.curllayer(self.final_conv(self.refpad(img)))
