@@ -252,9 +252,10 @@ class CURLLoss(nn.Module):
         ssim_loss_value = ssim_loss_value/num_images
         cosine_rgb_loss_value = cosine_rgb_loss_value/num_images
         hsv_loss_value = hsv_loss_value/num_images
+        grad_reg = gradient_regulariser.sum()/num_images
 
         curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value +
-                     hsv_loss_value + 10*ssim_loss_value + 1e-6*gradient_regulariser)/6
+                     hsv_loss_value + 10*ssim_loss_value + 1e-6*grad_reg)/6
 
         return curl_loss
 
@@ -344,7 +345,7 @@ class CURLLayer(nn.Module):
 
         img_clamped = torch.clamp(img, 0.0, 1.0)
         img_lab = torch.clamp(ImageProcessing.rgb_to_lab(
-            img_clamped), 0.0, 1.0) 
+            img_clamped), 0.0, 1.0)
         feat_lab = torch.cat((feat, img_lab), 1)
         
         x = self.lab_layer1(feat_lab)
@@ -361,10 +362,10 @@ class CURLLayer(nn.Module):
         L = self.fc_lab(x)
 
         img_lab, gradient_regulariser_lab = ImageProcessing.adjust_lab(
-            img_lab, L[0, 0:48])
+            img_lab, L[:, 0:48])
         img_rgb = ImageProcessing.lab_to_rgb(img_lab)
         img_rgb = torch.clamp(img_rgb, 0.0, 1.0)
-        feat_rgb = torch.cat((feat, img_rgb, 1)
+        feat_rgb = torch.cat((feat, img_rgb), 1)
 
         x = self.rgb_layer1(feat_rgb)
         x = self.rgb_layer2(x)
@@ -379,11 +380,11 @@ class CURLLayer(nn.Module):
         R = self.fc_rgb(x)
 
         img_rgb, gradient_regulariser_rgb = ImageProcessing.adjust_rgb(
-            img_rgb, R[0, 0:48])
+            img_rgb, R[:, 0:48])
         img_hsv = ImageProcessing.rgb_to_hsv(img_rgb)
         
         img_hsv = torch.clamp(img_hsv, 0.0, 1.0)
-        feat_hsv = torch.cat((feat, img_hsv, 1)
+        feat_hsv = torch.cat((feat, img_hsv), 1)
 
         x = self.hsv_layer1(feat_hsv)
         del feat_hsv
@@ -399,7 +400,7 @@ class CURLLayer(nn.Module):
         H = self.fc_hsv(x)
 
         img_hsv, gradient_regulariser_hsv = ImageProcessing.adjust_hsv(
-            img_hsv, H[0, 0:64])
+            img_hsv, H[:, 0:64])
         img_hsv = torch.clamp(img_hsv, 0.0, 1.0)
 
         img_residual = torch.clamp(ImageProcessing.hsv_to_rgb(
