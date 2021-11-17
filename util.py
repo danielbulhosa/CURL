@@ -34,10 +34,7 @@ class ImageProcessing(object):
         :rtype: Tensor
 
         """
-        img = img.permute(2, 1, 0)
-        shape = img.shape
         img = img.contiguous()
-        img = img.view(-1, 3)
 
         img = (img / 12.92) * img.le(0.04045).float() + (((torch.clamp(img,
                                                                        min=0.0001) + 0.055) / 1.055) ** 2.4) * img.gt(0.04045).float()
@@ -49,9 +46,9 @@ class ImageProcessing(object):
              0.950227],  # B
         ]), requires_grad=False).cuda()
 
-        img = torch.matmul(img, rgb_to_xyz)
+        img = torch.einsum('bcxy,ck->bkxy', img, rgb_to_xyz)
         img = torch.mul(img, Variable(torch.FloatTensor(
-            [1/0.950456, 1.0, 1/1.088754]), requires_grad=False).cuda())
+            [1/0.950456, 1.0, 1/1.088754]), requires_grad=False).cuda().reshape(1, 3, 1, 1))
 
         epsilon = 6/29
 
@@ -66,20 +63,17 @@ class ImageProcessing(object):
                                                     [0.0,    0.0, -200.0],
                                                     ]), requires_grad=False).cuda()
 
-        img = torch.matmul(img, fxfyfz_to_lab) + Variable(
-            torch.FloatTensor([-16.0, 0.0, 0.0]), requires_grad=False).cuda()
-
-        img = img.view(shape)
-        img = img.permute(2, 1, 0)
+        img = torch.einsum('bcxy,ck->bkxy', img, fxfyfz_to_lab) + Variable(
+            torch.FloatTensor([-16.0, 0.0, 0.0]).reshape(1, 3, 1, 1), requires_grad=False).cuda()
 
         '''
         L_chan: black and white with input range [0, 100]
         a_chan/b_chan: color channels with input range ~[-110, 110], not exact 
         [0, 100] => [0, 1],  ~[-110, 110] => [0, 1]
         '''
-        img[0, :, :] = img[0, :, :]/100
-        img[1, :, :] = (img[1, :, :]/110 + 1)/2
-        img[2, :, :] = (img[2, :, :]/110 + 1)/2
+        img[:, 0, :, :] = img[:, 0, :, :]/100
+        img[:, 1, :, :] = (img[:, 1, :, :]/110 + 1)/2
+        img[:, 2, :, :] = (img[:, 2, :, :]/110 + 1)/2
         
         #img[(img != img).detach()] = 0  # This line causes memory error
 
@@ -94,15 +88,12 @@ class ImageProcessing(object):
         :returns: adjusted image
         :rtype: Tensor
         """                
-        img = img.permute(2, 1, 0)
-        shape = img.shape
         img = img.contiguous()
-        img = img.view(-1, 3)
         img_copy = img.clone()
 
-        img_copy[:, 0] = img[:, 0] * 100
-        img_copy[:, 1] = ((img[:, 1] * 2)-1)*110
-        img_copy[:, 2] = ((img[:, 2] * 2)-1)*110
+        img_copy[:, 0, :, :] = img[:, 0, :, :] * 100
+        img_copy[:, 1, :, :] = ((img[:, 1, :, :] * 2)-1)*110
+        img_copy[:, 2, :, :] = ((img[:, 2, :, :] * 2)-1)*110
 
         img = img_copy.clone().cuda()
         del img_copy
@@ -113,8 +104,9 @@ class ImageProcessing(object):
             [0, 0, -1/200.0],  # B
         ]), requires_grad=False).cuda()
 
-        img = torch.matmul(
-            img + Variable(torch.FloatTensor([16.0, 0.0, 0.0]).cuda()), lab_to_fxfyfz)
+        img = torch.einsum('bcxy,ck->bkxy', 
+                           img + Variable(torch.FloatTensor([16.0, 0.0, 0.0]).cuda()).reshape(1, 3, 1, 1), 
+                           lab_to_fxfyfz)
 
         epsilon = 6.0/29.0
 
@@ -123,7 +115,7 @@ class ImageProcessing(object):
 
         # denormalize for D65 white point
         img = torch.mul(img, Variable(
-            torch.FloatTensor([0.950456, 1.0, 1.088754]).cuda()))
+            torch.FloatTensor([0.950456, 1.0, 1.088754]).cuda().reshape(1, 3, 1, 1)))
 
         xyz_to_rgb = Variable(torch.FloatTensor([  # X Y Z
             [3.2404542, -0.9692660,  0.0556434],  # R
@@ -131,13 +123,9 @@ class ImageProcessing(object):
             [-0.4985314,  0.0415560,  1.0572252],  # B
         ]), requires_grad=False).cuda()
 
-        img = torch.matmul(img, xyz_to_rgb)
-
+        img = torch.einsum('bcxy,ck->bkxy', img, xyz_to_rgb)
         img = (img * 12.92 * img.le(0.0031308).float()) + ((torch.clamp(img,
                                                                         min=0.0001) ** (1/2.4) * 1.055) - 0.055) * img.gt(0.0031308).float()
-
-        img = img.view(shape)
-        img = img.permute(2, 1, 0)
 
         img = img.contiguous()
         #img[(img != img).detach()] = 0 # This line causes memory error
@@ -270,37 +258,35 @@ class ImageProcessing(object):
 
         """
         img=torch.clamp(img, 0.0, 1.0)
-        img = img.permute(2, 1, 0)
         
         m1 = 0
-        m2 = (img[:, :, 2]*(1-img[:, :, 1])-img[:, :, 2])/60
+        m2 = (img[:, 2, :, :]*(1-img[:, 1, :, :])-img[:, 2, :, :])/60
         m3 = 0
         m4 = -1*m2
         m5 = 0
 
-        r = img[:, :, 2]+torch.clamp(img[:, :, 0]*360-0, 0.0, 60.0)*m1+torch.clamp(img[:, :, 0]*360-60, 0.0, 60.0)*m2+torch.clamp(
-            img[:, :, 0]*360-120, 0.0, 120.0)*m3+torch.clamp(img[:, :, 0]*360-240, 0.0, 60.0)*m4+torch.clamp(img[:, :, 0]*360-300, 0.0, 60.0)*m5
+        r = img[:, 2, :, :]+torch.clamp(img[:, 0, :, :]*360-0, 0.0, 60.0)*m1+torch.clamp(img[:, 0, :, :]*360-60, 0.0, 60.0)*m2+torch.clamp(
+            img[:, 0, :, :]*360-120, 0.0, 120.0)*m3+torch.clamp(img[:, 0, :, :]*360-240, 0.0, 60.0)*m4+torch.clamp(img[:, 0, :, :]*360-300, 0.0, 60.0)*m5
 
-        m1 = (img[:, :, 2]-img[:, :, 2]*(1-img[:, :, 1]))/60
+        m1 = (img[:, 2, :, :]-img[:, 2, :, :]*(1-img[:, 1, :, :]))/60
         m2 = 0
         m3 = -1*m1
         m4 = 0
 
-        g = img[:, :, 2]*(1-img[:, :, 1])+torch.clamp(img[:, :, 0]*360-0, 0.0, 60.0)*m1+torch.clamp(img[:, :, 0]*360-60,
-                                                                                                0.0, 120.0)*m2+torch.clamp(img[:, :, 0]*360-180, 0.0, 60.0)*m3+torch.clamp(img[:, :, 0]*360-240, 0.0, 120.0)*m4
+        g = img[:, 2, :, :]*(1-img[:, 1, :, :])+torch.clamp(img[:, 0, :, :]*360-0, 0.0, 60.0)*m1+torch.clamp(img[:, 0, :, :]*360-60,
+            0.0, 120.0)*m2+torch.clamp(img[:, 0, :, :]*360-180, 0.0, 60.0)*m3+torch.clamp(img[:, 0, :, :]*360-240, 0.0, 120.0)*m4
 
         m1 = 0
-        m2 = (img[:, :, 2]-img[:, :, 2]*(1-img[:, :, 1]))/60
+        m2 = (img[:, 2, :, :]-img[:, 2, :, :]*(1-img[:, 1, :, :]))/60
         m3 = 0
         m4 = -1*m2
 
-        b = img[:, :, 2]*(1-img[:, :, 1])+torch.clamp(img[:, :, 0]*360-0, 0.0, 120.0)*m1+torch.clamp(img[:, :, 0]*360 -
-                                                                                                 120, 0.0, 60.0)*m2+torch.clamp(img[:, :, 0]*360-180, 0.0, 120.0)*m3+torch.clamp(img[:, :, 0]*360-300, 0.0, 60.0)*m4
+        b = img[:, 2, :, :]*(1-img[:, 1, :, :])+torch.clamp(img[:, 0, :, :]*360-0, 0.0, 120.0)*m1+torch.clamp(img[:, 0, :, :]*360 -
+            120, 0.0, 60.0)*m2+torch.clamp(img[:, 0, :, :]*360-180, 0.0, 120.0)*m3+torch.clamp(img[:, 0, :, :]*360-300, 0.0, 60.0)*m4
 
-        img = torch.stack((r, g, b), 2)
+        img = torch.stack((r, g, b), 1)
         #img[(img != img).detach()] = 0 # This causes memory error
 
-        img = img.permute(2, 1, 0)
         img = img.contiguous()
         img = torch.clamp(img, 0.0, 1.0)
 
@@ -319,32 +305,43 @@ class ImageProcessing(object):
         :rtype: Tensor
 
         """
+        # FIXME - complete refactor to taking batches
         img=torch.clamp(img, 10**(-9), 1.0)       
 
+        # Permute channels c, x, y -> y, x, c
         img = img.permute(2, 1, 0)
         shape = img.shape
 
         img = img.contiguous()
+        # Flatten along y, x dims, keep c
         img = img.view(-1, 3)
 
+        # Take max and min along channel dim, take max values (0 index), not max idx (1 index)
         mx = torch.max(img, 1)[0]
         mn = torch.min(img, 1)[0]
 
+        # Create ones 1D tensor with size y * x
         ones = Variable(torch.FloatTensor(
             torch.ones((img.shape[0])))).cuda()
+        # Create zeros tensor with shape (x, y)
         zero = Variable(torch.FloatTensor(torch.zeros(shape[0:2]))).cuda()
 
+        # Image back to shape y, x, c
         img = img.view(shape)
         
+        # Chunk ones, max, and min tensors
         ones1, ones2 = torch.chunk(ones, 2, dim=0)
         mx1, mx2 = torch.chunk(mx, 2, dim=0)
         mn1, mn2 = torch.chunk(mn, 2, dim=0)
 
+        # Add mx1, ones1, and mn1, same for 2. 
         df1 = torch.add(mx1, torch.mul(ones1*-1, mn1))
         df2 = torch.add(mx2, torch.mul(ones2*-1, mn2))
 
+        # Cat results along 0 (chunk dim). Why did we chunk in the first place???
         df = torch.cat((df1, df2), 0)
         del df1, df2
+        # Reshapes y * x size 1D tensor to (y, x) 2D shape tensor
         df = df.view(shape[0:2])+1e-10
         mx = mx.view(shape[0:2])
 
@@ -352,19 +349,24 @@ class ImageProcessing(object):
         df = df.cuda()
         mx = mx.cuda()
 
+        # Extract each channel into its own (y, x) shape tensor
         g = img[:, :, 1].clone().cuda()
         b = img[:, :, 2].clone().cuda()
         r = img[:, :, 0].clone().cuda()
 
+        # Shape: y, x, c
         img_copy = img.clone()
         
+        # Transform color channel 0, (Hue?)
         img_copy[:, :, 0] = (((g-b)/df)*r.eq(mx).float() + (2.0+(b-r)/df)
                          * g.eq(mx).float() + (4.0+(r-g)/df)*b.eq(mx).float())
         img_copy[:, :, 0] = img_copy[:, :, 0]*60.0
 
+        # New copy of image, move zero tensor to GPU
         zero = zero.cuda()
         img_copy2 = img_copy.clone()
 
+        # More transformation of color channel 0, (Hue?)
         img_copy2[:, :, 0] = img_copy[:, :, 0].lt(zero).float(
         )*(img_copy[:, :, 0]+360) + img_copy[:, :, 0].ge(zero).float()*(img_copy[:, :, 0])
 
@@ -372,6 +374,7 @@ class ImageProcessing(object):
 
         del img, r, g, b
 
+        # Set saturation and value (S and V channels) with existing variables
         img_copy2[:, :, 1] = mx.ne(zero).float()*(df/mx) + \
             mx.eq(zero).float()*(zero)
         img_copy2[:, :, 2] = mx
@@ -380,6 +383,7 @@ class ImageProcessing(object):
 
         img = img_copy2.clone()
 
+        # Reshape y, x, c -> c, x, y
         img = img.permute(2, 1, 0)
         img = torch.clamp(img, 10**(-9), 1.0)
 
