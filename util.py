@@ -305,86 +305,54 @@ class ImageProcessing(object):
         :rtype: Tensor
 
         """
-        # FIXME - complete refactor to taking batches
         img=torch.clamp(img, 10**(-9), 1.0)       
 
-        # Permute channels c, x, y -> y, x, c
-        img = img.permute(2, 1, 0)
-        shape = img.shape
-
+        # Shape (b, c, x, y)
         img = img.contiguous()
-        # Flatten along y, x dims, keep c
-        img = img.view(-1, 3)
 
-        # Take max and min along channel dim, take max values (0 index), not max idx (1 index)
+        # Shape (b, x, y)
         mx = torch.max(img, 1)[0]
         mn = torch.min(img, 1)[0]
 
-        # Create ones 1D tensor with size y * x
         ones = Variable(torch.FloatTensor(
-            torch.ones((img.shape[0])))).cuda()
-        # Create zeros tensor with shape (x, y)
-        zero = Variable(torch.FloatTensor(torch.zeros(shape[0:2]))).cuda()
-
-        # Image back to shape y, x, c
-        img = img.view(shape)
-        
-        # Chunk ones, max, and min tensors
-        ones1, ones2 = torch.chunk(ones, 2, dim=0)
-        mx1, mx2 = torch.chunk(mx, 2, dim=0)
-        mn1, mn2 = torch.chunk(mn, 2, dim=0)
-
-        # Add mx1, ones1, and mn1, same for 2. 
-        df1 = torch.add(mx1, torch.mul(ones1*-1, mn1))
-        df2 = torch.add(mx2, torch.mul(ones2*-1, mn2))
-
-        # Cat results along 0 (chunk dim). Why did we chunk in the first place???
-        df = torch.cat((df1, df2), 0)
-        del df1, df2
-        # Reshapes y * x size 1D tensor to (y, x) 2D shape tensor
-        df = df.view(shape[0:2])+1e-10
-        mx = mx.view(shape[0:2])
+            torch.ones(mn.shape))).cuda()
+        zero = Variable(torch.FloatTensor(torch.zeros(mn.shape))).cuda()
+        df = torch.add(mx, torch.mul(ones*-1, mn))
 
         img = img.cuda()
         df = df.cuda()
         mx = mx.cuda()
 
-        # Extract each channel into its own (y, x) shape tensor
-        g = img[:, :, 1].clone().cuda()
-        b = img[:, :, 2].clone().cuda()
-        r = img[:, :, 0].clone().cuda()
+        # Each channel is shape (b, x, y) tensor
+        r = img[:, 0, :, :].clone().cuda()
+        g = img[:, 1, :, :].clone().cuda()
+        b = img[:, 2, :, :].clone().cuda()
 
-        # Shape: y, x, c
         img_copy = img.clone()
         
-        # Transform color channel 0, (Hue?)
-        img_copy[:, :, 0] = (((g-b)/df)*r.eq(mx).float() + (2.0+(b-r)/df)
+        # New channel 0, hue
+        img_copy[:, 0, :, :] = (((g-b)/df)*r.eq(mx).float() + (2.0+(b-r)/df)
                          * g.eq(mx).float() + (4.0+(r-g)/df)*b.eq(mx).float())
-        img_copy[:, :, 0] = img_copy[:, :, 0]*60.0
+        img_copy[:, 0, :, :] = img_copy[:, 0, :, :]*60.0
 
-        # New copy of image, move zero tensor to GPU
         zero = zero.cuda()
         img_copy2 = img_copy.clone()
 
-        # More transformation of color channel 0, (Hue?)
-        img_copy2[:, :, 0] = img_copy[:, :, 0].lt(zero).float(
-        )*(img_copy[:, :, 0]+360) + img_copy[:, :, 0].ge(zero).float()*(img_copy[:, :, 0])
+        img_copy2[:, 0, :, :] = img_copy[:, 0, :, :].lt(zero).float(
+        )*(img_copy[:, 0, :, :]+360) + img_copy[:, 0, :, :].ge(zero).float()*(img_copy[:, 0, :, :])
 
-        img_copy2[:, :, 0] = img_copy2[:, :, 0]/360
+        img_copy2[:, 0, :, :] = img_copy2[:, 0, :, :]/360
 
         del img, r, g, b
 
-        # Set saturation and value (S and V channels) with existing variables
-        img_copy2[:, :, 1] = mx.ne(zero).float()*(df/mx) + \
+        # Set saturation and value, remaining channels
+        img_copy2[:, 1, :, :] = mx.ne(zero).float()*(df/mx) + \
             mx.eq(zero).float()*(zero)
-        img_copy2[:, :, 2] = mx
+        img_copy2[:, 2, :, :] = mx
         
         #img_copy2[(img_copy2 != img_copy2).detach()] = 0 # This line causes memory error
 
         img = img_copy2.clone()
-
-        # Reshape y, x, c -> c, x, y
-        img = img.permute(2, 1, 0)
         img = torch.clamp(img, 10**(-9), 1.0)
 
         return img
@@ -401,28 +369,29 @@ class ImageProcessing(object):
         :rtype: Tensor
 
         """
-        slope = Variable(torch.zeros((C.shape[0]-1))).cuda()
-        curve_steps = C.shape[0]-1
+        slope = Variable(torch.zeros((C.shape[0], C.shape[1]-1))).cuda()
+        curve_steps = C.shape[1]-1
 
         '''
         Compute the slope of the line segments
         '''
-        slope = C[1:]-C[0:-1]
+        slope = C[:, 1:]-C[:, 0:-1]
 
         '''
         Compute the squared difference between slopes
         '''
-        slope_sqr_diff += ((slope[1:]-slope[0:-1])**2).sum(0)
+        slope_sqr_diff += ((slope[:, 1:]-slope[:, 0:-1])**2).sum(1)
 
         '''
         Use predicted line segments to compute scaling factors for the channel
         '''
-        steps = torch.arange(0, slope.shape[0]-1).cuda()
-        image_channel = torch.unsqueeze(img[:, :,channel_in], -1) # expand dims to broadcast
-        scale = C[0] + (slope[:-1] * (curve_steps * image_channel - steps)).sum(-1) # eq. 1
+        steps = torch.arange(0, slope.shape[1]-1).cuda()
+        image_channel = torch.unsqueeze(img[:, channel_in, :, :], 1) # expand dims to broadcast
+        scale = C[:, 0] + (slope[:, :-1].reshape(slope.shape[0], slope.shape[1] - 1, 1, 1) * 
+                           (curve_steps * image_channel - steps.reshape(1, steps.shape[0], 1, 1))).sum(1) # eq. 1
                 
         img_copy = img.clone()
-        img_copy[:, :, channel_out] = img[:, :, channel_out]*scale
+        img_copy[:, channel_out, :, :] = img[:, channel_out, :, :]*scale
         img_copy = torch.clamp(img_copy, 0.0, 1.0)
         
         return img_copy, slope_sqr_diff
@@ -437,14 +406,13 @@ class ImageProcessing(object):
         :rtype: Tensor, float
 
         """
-        img = img.permute(2, 1, 0)
-        shape = img.shape
         img = img.contiguous()
+        batch_dim = img.shape[0]
 
-        S1, S2, S3, S4 = torch.chunk(S, 4, dim=0)
+        S1, S2, S3, S4 = torch.chunk(S, 4, dim=1)
         S1, S2, S3, S4 = torch.exp(S1), torch.exp(S2), torch.exp(S3), torch.exp(S4)
 
-        slope_sqr_diff = Variable(torch.zeros(1)*0.0).cuda()
+        slope_sqr_diff = Variable(torch.zeros(batch_dim)*0.0).cuda()
 
         '''
         Adjust Hue channel based on Hue using the predicted curve
@@ -475,7 +443,6 @@ class ImageProcessing(object):
 
         #img[(img != img).detach()] = 0 # This line causes memory error
 
-        img = img.permute(2, 1, 0)
         img = img.contiguous()
         
         return img, slope_sqr_diff
@@ -490,20 +457,19 @@ class ImageProcessing(object):
         :rtype: Tensor, float
 
         """
-        img = img.permute(2, 1, 0)
-        shape = img.shape
         img = img.contiguous()
+        batch_dim = img.shape[0]
 
         '''
         Extract the parameters of the three curves
         '''
-        R1, R2, R3 = torch.chunk(R, 3, dim=0)
+        R1, R2, R3 = torch.chunk(R, 3, dim=1)
         R1, R2, R3 = torch.exp(R1), torch.exp(R2), torch.exp(R3)
 
         '''
         Apply the curve to the R channel 
         '''
-        slope_sqr_diff = Variable(torch.zeros(1)*0.0).cuda()
+        slope_sqr_diff = Variable(torch.zeros(batch_dim)*0.0).cuda()
 
         img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
             img, R1, slope_sqr_diff, channel_in=0, channel_out=0)
@@ -525,7 +491,6 @@ class ImageProcessing(object):
 
         #img[(img != img).detach()] = 0 # This line causes memory error
 
-        img = img.permute(2, 1, 0)
         img = img.contiguous()
 
         return img, slope_sqr_diff
@@ -540,17 +505,17 @@ class ImageProcessing(object):
         :rtype: Tensor, float
 
         """
-        img = img.permute(2, 1, 0)
-        shape = img.shape
+
         img = img.contiguous()
+        batch_dim = img.shape[0]
 
         '''
         Extract predicted parameters for each L,a,b curve
         '''
-        L1, L2, L3 = torch.chunk(L, 3, dim=0)
+        L1, L2, L3 = torch.chunk(L, 3, dim=1)
         L1, L2, L3 = torch.exp(L1), torch.exp(L2), torch.exp(L3)
 
-        slope_sqr_diff = Variable(torch.zeros(1)*0.0).cuda()
+        slope_sqr_diff = Variable(torch.zeros(batch_dim)*0.0).cuda()
 
         '''
         Apply the curve to the L channel 
@@ -575,7 +540,6 @@ class ImageProcessing(object):
 
         #img[(img != img).detach()] = 0 # This line causes memory error
 
-        img = img.permute(2, 1, 0)
         img = img.contiguous()
 
         return img, slope_sqr_diff
