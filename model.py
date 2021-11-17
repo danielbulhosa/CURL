@@ -344,8 +344,8 @@ class CURLLayer(nn.Module):
 
         img_clamped = torch.clamp(img, 0.0, 1.0)
         img_lab = torch.clamp(ImageProcessing.rgb_to_lab(
-            img_clamped.squeeze(0)), 0.0, 1.0) 
-        feat_lab = torch.cat((feat, img_lab.unsqueeze(0)), 1)
+            img_clamped), 0.0, 1.0) 
+        feat_lab = torch.cat((feat, img_lab), 1)
         
         x = self.lab_layer1(feat_lab)
         del feat_lab
@@ -364,7 +364,7 @@ class CURLLayer(nn.Module):
             img_lab, L[0, 0:48])
         img_rgb = ImageProcessing.lab_to_rgb(img_lab)
         img_rgb = torch.clamp(img_rgb, 0.0, 1.0)
-        feat_rgb = torch.cat((feat, img_rgb.unsqueeze(0)), 1)
+        feat_rgb = torch.cat((feat, img_rgb, 1)
 
         x = self.rgb_layer1(feat_rgb)
         x = self.rgb_layer2(x)
@@ -383,7 +383,7 @@ class CURLLayer(nn.Module):
         img_hsv = ImageProcessing.rgb_to_hsv(img_rgb)
         
         img_hsv = torch.clamp(img_hsv, 0.0, 1.0)
-        feat_hsv = torch.cat((feat, img_hsv.unsqueeze(0)), 1)
+        feat_hsv = torch.cat((feat, img_hsv, 1)
 
         x = self.hsv_layer1(feat_hsv)
         del feat_hsv
@@ -405,7 +405,7 @@ class CURLLayer(nn.Module):
         img_residual = torch.clamp(ImageProcessing.hsv_to_rgb(
            img_hsv), 0.0, 1.0)
 
-        img = torch.clamp(img + img_residual.unsqueeze(0), 0.0, 1.0)
+        img = torch.clamp(img + img_residual, 0.0, 1.0)
         gradient_regulariser = gradient_regulariser_rgb + \
             gradient_regulariser_lab+gradient_regulariser_hsv
 
