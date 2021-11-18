@@ -115,9 +115,9 @@ class CURLLoss(nn.Module):
 
         v1 = 2.0 * sigma12.cuda() + C2
         v2 = sigma1_sq.cuda() + sigma2_sq.cuda() + C2
-        cs = torch.mean(v1 / v2)
+        cs = torch.mean(v1 / v2, dim=(1, 2, 3))
 
-        return ssim_map.mean(), cs
+        return ssim_map.mean(dim=(1, 2, 3)), cs
 
 
     def compute_msssim(self, img1, img2):
@@ -155,19 +155,19 @@ class CURLLoss(nn.Module):
             img1 = F.avg_pool2d(img1, (2, 2))
             img2 = F.avg_pool2d(img2, (2, 2))
 
-        ssims = torch.stack(ssims)
-        mcs = torch.stack(mcs)
+        ssims = torch.stack(ssims, dim=1)
+        mcs = torch.stack(mcs, dim=1)
 
         # Simple normalize (not compliant with original definition)
         # TODO: remove support for normalize == True (kept for backward support)
         ssims = (ssims + 1) / 2
         mcs = (mcs + 1) / 2
 
-        pow1 = mcs ** weights
-        pow2 = ssims ** weights
+        pow1 = mcs ** weights.reshape(1, weights.shape[0])
+        pow2 = ssims ** weights.reshape(1, weights.shape[0])
 
         # From Matlab implementation https://ece.uwaterloo.ca/~z70wang/research/iwssim/
-        output = torch.prod(pow1[:-1] * pow2[-1])
+        output = torch.prod(pow1[:, :-1] * pow2[:, -1].reshape(-1, 1), dim=1)
         return output
 
     def forward(self, predicted_img_batch, target_img_batch, gradient_regulariser):
@@ -181,78 +181,52 @@ class CURLLoss(nn.Module):
 
         """
         num_images = target_img_batch.shape[0]
-        target_img_batch = target_img_batch
-
-        ssim_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1))).cuda()
-        l1_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1))).cuda()
-        cosine_rgb_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1))).cuda()
-        hsv_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1))).cuda()
-        rgb_loss_value = Variable(
-            torch.FloatTensor(torch.zeros(1, 1))).cuda()
-
-        for i in range(0, num_images):
-
-            target_img = target_img_batch[i, :, :, :].cuda()
-            predicted_img = predicted_img_batch[i, :, :, :].cuda()
-
-            predicted_img_lab = torch.clamp(
-                ImageProcessing.rgb_to_lab(predicted_img.squeeze(0)), 0.0, 1.0)
-            target_img_lab = torch.clamp(
-                ImageProcessing.rgb_to_lab(target_img.squeeze(0)), 0.0, 1.0)
-
-            target_img_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(
-                target_img), 0.0, 1.0)
-            predicted_img_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(
-                predicted_img.squeeze(0)), 0.0, 1.0)
-
-            predicted_img_hue = (predicted_img_hsv[0, :, :]*2*math.pi)
-            predicted_img_val = predicted_img_hsv[2, :, :]
-            predicted_img_sat = predicted_img_hsv[1, :, :]
-            target_img_hue = (target_img_hsv[0, :, :]*2*math.pi)
-            target_img_val = target_img_hsv[2, :, :]
-            target_img_sat = target_img_hsv[1, :, :]
-
-            target_img_L_ssim = target_img_lab[0, :, :].unsqueeze(0)
-            predicted_img_L_ssim = predicted_img_lab[0, :, :].unsqueeze(0)
-            target_img_L_ssim = target_img_L_ssim.unsqueeze(0)
-            predicted_img_L_ssim = predicted_img_L_ssim.unsqueeze(0)
-
-            ssim_value = self.compute_msssim(
-                predicted_img_L_ssim, target_img_L_ssim)
-
-            ssim_loss_value += (1.0 - ssim_value)
-
-            predicted_img_1 = predicted_img_val * \
-                predicted_img_sat*torch.cos(predicted_img_hue)
-            predicted_img_2 = predicted_img_val * \
-                predicted_img_sat*torch.sin(predicted_img_hue)
-
-            target_img_1 = target_img_val * \
-                target_img_sat*torch.cos(target_img_hue)
-            target_img_2 = target_img_val * \
-                target_img_sat*torch.sin(target_img_hue)
-
-            predicted_img_hsv = torch.stack(
-                (predicted_img_1, predicted_img_2, predicted_img_val), 2)
-            target_img_hsv = torch.stack((target_img_1, target_img_2, target_img_val), 2)
-
-            l1_loss_value += F.l1_loss(predicted_img_lab, target_img_lab)
-            rgb_loss_value += F.l1_loss(predicted_img, target_img)
-            hsv_loss_value += F.l1_loss(predicted_img_hsv, target_img_hsv)
-
-            cosine_rgb_loss_value += (1-torch.mean(
-                torch.nn.functional.cosine_similarity(predicted_img, target_img, dim=0)))
-
-        l1_loss_value = l1_loss_value/num_images
-        rgb_loss_value = rgb_loss_value/num_images
-        ssim_loss_value = ssim_loss_value/num_images
-        cosine_rgb_loss_value = cosine_rgb_loss_value/num_images
-        hsv_loss_value = hsv_loss_value/num_images
-        grad_reg = gradient_regulariser.sum()/num_images
+        
+        # Batch calculate LAB values
+        target_img_batch_lab = torch.clamp(
+            ImageProcessing.rgb_to_lab(target_img_batch), 0.0, 1.0)
+        predicted_img_batch_lab = torch.clamp(
+            ImageProcessing.rgb_to_lab(predicted_img_batch), 0.0, 1.0)
+            
+        target_img_batch_L_ssim = target_img_batch_lab[:, 0, :, :].unsqueeze(1)
+        predicted_img_batch_L_ssim = predicted_img_batch_lab[:, 0, :, :].unsqueeze(1)
+        
+        # Batch calculate HSV values
+        target_img_batch_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(
+            target_img_batch), 0.0, 1.0)
+        predicted_img_batch_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(
+            predicted_img_batch), 0.0, 1.0)
+                                        
+        predicted_img_batch_hue = (predicted_img_batch_hsv[:, 0, :, :]*2*math.pi)
+        predicted_img_batch_val = predicted_img_batch_hsv[:, 2, :, :]
+        predicted_img_batch_sat = predicted_img_batch_hsv[:, 1, :, :]
+        target_img_batch_hue = (target_img_batch_hsv[:, 0, :, :]*2*math.pi)
+        target_img_batch_val = target_img_batch_hsv[:, 2, :, :]
+        target_img_batch_sat = target_img_batch_hsv[:, 1, :, :]
+                                              
+        predicted_img_batch_1 = predicted_img_batch_val * \
+            predicted_img_batch_sat*torch.cos(predicted_img_batch_hue)
+        predicted_img_batch_2 = predicted_img_batch_val * \
+            predicted_img_batch_sat*torch.sin(predicted_img_batch_hue)
+                                              
+        target_img_batch_1 = target_img_batch_val * \
+            target_img_batch_sat*torch.cos(target_img_batch_hue)
+        target_img_batch_2 = target_img_batch_val * \
+            target_img_batch_sat*torch.sin(target_img_batch_hue)
+                                              
+        
+        predicted_img_batch_hsv = torch.stack(
+            (predicted_img_batch_1, predicted_img_batch_2, predicted_img_batch_val), 1)  # Stack along original channel axis
+        target_img_batch_hsv = torch.stack((target_img_batch_1, target_img_batch_2, target_img_batch_val), 1)
+                                              
+        # Calculate losses: batch
+        l1_loss_value = F.l1_loss(predicted_img_batch_lab, target_img_batch_lab)
+        rgb_loss_value = F.l1_loss(predicted_img_batch, target_img_batch)
+        hsv_loss_value = F.l1_loss(predicted_img_batch_hsv, target_img_batch_hsv)                                              
+        cosine_rgb_loss_value = (1.0 - torch.nn.functional.cosine_similarity(predicted_img_batch, 
+                                                                            target_img_batch, dim=1).mean(dim=(1, 2))).mean()
+        ssim_loss_value = (1.0 - self.compute_msssim(predicted_img_batch_L_ssim , target_img_batch_L_ssim)).mean()
+        grad_reg = gradient_regulariser.mean()                
 
         curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value +
                      hsv_loss_value + 10*ssim_loss_value + 1e-6*grad_reg)/6
