@@ -386,9 +386,9 @@ class ImageProcessing(object):
         Use predicted line segments to compute scaling factors for the channel
         '''
         steps = torch.arange(0, slope.shape[1]-1).cuda()
-        image_channel = torch.unsqueeze(img[:, channel_in, :, :], 1) # expand dims to broadcast
-        scale = C[:, 0] + (slope[:, :-1].reshape(slope.shape[0], slope.shape[1] - 1, 1, 1) * 
-                           (curve_steps * image_channel - steps.reshape(1, steps.shape[0], 1, 1))).sum(1) # eq. 1
+        image_channel = torch.unsqueeze(img[:, channel_in, :, :], 1)  # expand dims to broadcast
+        scale = C[:, 0].reshape(-1, 1, 1) + (slope[:, :-1].reshape(slope.shape[0], slope.shape[1] - 1, 1, 1) * 
+                           (curve_steps * image_channel - steps.reshape(1, steps.shape[0], 1, 1))).sum(1)  # eq. 1
                 
         img_copy = img.clone()
         img_copy[:, channel_out, :, :] = img[:, channel_out, :, :]*scale
