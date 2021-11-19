@@ -169,6 +169,33 @@ class CURLLoss(nn.Module):
         # From Matlab implementation https://ece.uwaterloo.ca/~z70wang/research/iwssim/
         output = torch.prod(pow1[:, :-1] * pow2[:, -1].reshape(-1, 1), dim=1)
         return output
+    
+    @staticmethod
+    def batch_lab_convert(img_batch):
+        converted_batch = ImageProcessing.rgb_to_lab(img_batch)
+        converted_batch = torch.clamp(converted_batch, 0.0, 1.0)
+        return converted_batch
+    
+    @staticmethod
+    def batch_L_ssim_convert(lab_img_batch):
+        return lab_img_batch[:, 0, :, :].unsqueeze(1)
+    
+    @staticmethod
+    def batch_hsv_convert(img_batch):
+        # Batch calculate HSV values
+        img_batch_hsv = ImageProcessing.rgb_to_hsv(img_batch)
+        img_batch_hsv = torch.clamp(img_batch_hsv, 0.0, 1.0)
+                                        
+        img_batch_hue = 2*math.pi*img_batch_hsv[:, 0, :, :]
+        img_batch_val = img_batch_hsv[:, 2, :, :]
+        img_batch_sat = img_batch_hsv[:, 1, :, :]
+                                              
+        img_batch_1 = img_batch_val * img_batch_sat*torch.cos(img_batch_hue)
+        img_batch_2 = img_batch_val * img_batch_sat*torch.sin(img_batch_hue)
+                                              
+        img_batch_hsv = torch.stack((img_batch_1, img_batch_2, img_batch_val), 1)
+        return img_batch_hsv
+        
 
     def forward(self, predicted_img_batch, target_img_batch, gradient_regulariser):
         """Forward function for the CURL loss
@@ -180,44 +207,14 @@ class CURLLoss(nn.Module):
         :rtype: float
 
         """
-        num_images = target_img_batch.shape[0]
-        
-        # Batch calculate LAB values
-        target_img_batch_lab = torch.clamp(
-            ImageProcessing.rgb_to_lab(target_img_batch), 0.0, 1.0)
-        predicted_img_batch_lab = torch.clamp(
-            ImageProcessing.rgb_to_lab(predicted_img_batch), 0.0, 1.0)
+        target_img_batch_lab = self.batch_lab_convert(target_img_batch)
+        predicted_img_batch_lab = self.batch_lab_convert(predicted_img_batch)
             
-        target_img_batch_L_ssim = target_img_batch_lab[:, 0, :, :].unsqueeze(1)
-        predicted_img_batch_L_ssim = predicted_img_batch_lab[:, 0, :, :].unsqueeze(1)
+        target_img_batch_L_ssim = self.batch_L_ssim_convert(target_img_batch_lab)
+        predicted_img_batch_L_ssim = self.batch_L_ssim_convert(predicted_img_batch_lab)
         
-        # Batch calculate HSV values
-        target_img_batch_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(
-            target_img_batch), 0.0, 1.0)
-        predicted_img_batch_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(
-            predicted_img_batch), 0.0, 1.0)
-                                        
-        predicted_img_batch_hue = (predicted_img_batch_hsv[:, 0, :, :]*2*math.pi)
-        predicted_img_batch_val = predicted_img_batch_hsv[:, 2, :, :]
-        predicted_img_batch_sat = predicted_img_batch_hsv[:, 1, :, :]
-        target_img_batch_hue = (target_img_batch_hsv[:, 0, :, :]*2*math.pi)
-        target_img_batch_val = target_img_batch_hsv[:, 2, :, :]
-        target_img_batch_sat = target_img_batch_hsv[:, 1, :, :]
-                                              
-        predicted_img_batch_1 = predicted_img_batch_val * \
-            predicted_img_batch_sat*torch.cos(predicted_img_batch_hue)
-        predicted_img_batch_2 = predicted_img_batch_val * \
-            predicted_img_batch_sat*torch.sin(predicted_img_batch_hue)
-                                              
-        target_img_batch_1 = target_img_batch_val * \
-            target_img_batch_sat*torch.cos(target_img_batch_hue)
-        target_img_batch_2 = target_img_batch_val * \
-            target_img_batch_sat*torch.sin(target_img_batch_hue)
-                                              
-        
-        predicted_img_batch_hsv = torch.stack(
-            (predicted_img_batch_1, predicted_img_batch_2, predicted_img_batch_val), 1)  # Stack along original channel axis
-        target_img_batch_hsv = torch.stack((target_img_batch_1, target_img_batch_2, target_img_batch_val), 1)
+        target_img_batch_hsv = self.batch_hsv_convert(target_img_batch)
+        predicted_img_batch_hsv = self.batch_hsv_convert(predicted_img_batch)
                                               
         # Calculate losses: batch
         l1_loss_value = F.l1_loss(predicted_img_batch_lab, target_img_batch_lab)
