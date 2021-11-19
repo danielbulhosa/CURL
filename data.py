@@ -101,6 +101,22 @@ class Dataset(torch.utils.data.Dataset):
         self.normaliser = normaliser
         self.is_valid = is_valid
         self.is_inference = is_inference
+        
+    @staticmethod
+    def pad(image_tensor, crop_height, crop_width):
+        image_height, image_width = image_tensor.shape[1:]
+
+        if crop_width > image_width or crop_height > image_height:
+            padding_ltrb = [
+            (crop_width - image_width) // 2 if crop_width > image_width else 0,
+            (crop_height - image_height) // 2 if crop_height > image_height else 0,
+            (crop_width - image_width + 1) // 2 if crop_width > image_width else 0,
+            (crop_height - image_height + 1) // 2 if crop_height > image_height else 0,
+            ]
+            return TF.pad(image_tensor, padding_ltrb, fill=0)
+        else:
+            return image_tensor
+        
 
     def __len__(self):
         """Returns the number of images in the dataset
@@ -121,83 +137,43 @@ class Dataset(torch.utils.data.Dataset):
         :rtype: dictionary
 
         """
-        while True:
 
-            if (self.is_inference) or (self.is_valid):
+        input_img = util.ImageProcessing.load_image(
+            self.data_dict[idx]['input_img'], normaliser=self.normaliser)
+        output_img = util.ImageProcessing.load_image(
+            self.data_dict[idx]['output_img'], normaliser=self.normaliser)
 
-                input_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['input_img'], normaliser=self.normaliser)
-                output_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['output_img'], normaliser=self.normaliser)
+        if self.normaliser==1:
+            input_img, output_img = input_img.astype(np.uint8), output_img.astype(np.uint8)
 
-                if self.normaliser==1:
-                    input_img = input_img.astype(np.uint8)
-                    output_img = output_img.astype(np.uint8)
+        input_img, output_img = TF.to_tensor(input_img), TF.to_tensor(output_img)
+        # FIXME - better options here:
+        #   - Have a crop size range instead of a fixed number
+        #   - Analyze data to come up with better fixed crop size
+        #   - Do a random crop instead of a center crop
+        crop_h, crop_w = 256, 256
+        input_img, output_img = self.pad(input_img, crop_h, crop_w), self.pad(output_img, crop_h, crop_w)
+        input_img, output_img = TF.center_crop(input_img, (crop_h, crop_w)), TF.center_crop(output_img, (crop_h, crop_w))
 
-                input_img = TF.to_pil_image(input_img)
-                input_img = TF.to_tensor(input_img)
-                output_img = TF.to_pil_image(output_img)
-                output_img = TF.to_tensor(output_img)
+        if not self.is_valid and not self.is_inference:
 
-                if input_img.shape[1]==output_img.shape[2]:
-                    output_img=output_img.permute(0,2,1)
+                # Random horizontal flipping
+                if random.random() > 0.5:
+                    input_img, output_img = TF.hflip(input_img), TF.hflip(output_img)
 
-                return {'input_img': input_img, 'output_img': output_img,
-                        'name': self.data_dict[idx]['input_img'].split("/")[-1]}
+                # Random vertical flipping
+                if random.random() > 0.5:
+                    input_img, output_img = TF.vflip(input_img), TF.vflip(output_img)
+                  
+                # Random modulo 90 degree rotation
+                rotation = int(np.random.choice([-90, 0, 90, 180]))
+                if rotation != 0:
+                    input_img, output_img = TF.rotate(input_img, rotation, expand=True),\
+                                            TF.rotate(output_img, rotation, expand=True)
 
-            else:
 
-                output_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['output_img'], normaliser=self.normaliser)
-                input_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['input_img'], normaliser=self.normaliser)
-
-                if self.normaliser==1:
-                    input_img = input_img.astype(np.uint8)
-                    output_img = output_img.astype(np.uint8)
-
-                input_img = TF.to_pil_image(input_img)
-                output_img = TF.to_pil_image(output_img)
-      
-                if not self.is_valid:
-                        
-                        # Random horizontal flipping
-                        if random.random() > 0.5:
-                            input_img = TF.hflip(input_img)
-                            output_img = TF.hflip(output_img)
-
-                        # Random vertical flipping
-                        if random.random() > 0.5:
-                            input_img = TF.vflip(input_img)
-                            output_img = TF.vflip(output_img)
-
-                        # Random rotation +90
-                        if random.random() > 0.5:
-                            input_img=TF.rotate(input_img,90,expand=True)
-                            output_img=TF.rotate(output_img,90,expand=True)
-                            #input_img.save("./"+self.data_dict[idx]['input_img'].split("/")[-1]+"1.png")
-                            #output_img.save("./"+self.data_dict[idx]['output_img'].split("/")[-1]+"2.png")
-
-                        # Random rotation -90
-                        if random.random() > 0.5:
-                            input_img=TF.rotate(input_img,-90, expand=True)
-                            output_img=TF.rotate(output_img,-90, expand=True)
-
-                        # Random rotation -90
-                        if random.random() > 0.5:
-                            input_img=TF.rotate(input_img, 180, expand=True)
-                            output_img=TF.rotate(output_img, 180, expand=True)
-
-                        #output_img.save("./"+self.data_dict[idx]['output_img'].split("/")[-1]+"2.png")
-              
-                # Transform to tensor
-                #print(output_img.shape)
-                #plt.imsave("./"+self.data_dict[idx]['input_img'].split("/")[-1]+".png", output_img,format='png')
-                input_img = TF.to_tensor(input_img)
-                output_img = TF.to_tensor(output_img)
-                
-                return {'input_img': input_img, 'output_img': output_img,
-                        'name': self.data_dict[idx]['input_img'].split("/")[-1]}
+        return {'input_img': input_img, 'output_img': output_img,
+                'name': self.data_dict[idx]['input_img'].split("/")[-1]}
 
 
 class DataLoader():
