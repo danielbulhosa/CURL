@@ -87,6 +87,7 @@ def main():
     parser.add_argument(
         "--training_img_dirpath", required=False,
         help="Directory containing images to train a DeepLPF model instance", default="/home/sjm213/adobe5k/adobe5k/")
+    parser.add_argument("--batch_size", type=int, required=False,help="Batch size", default=1)
 
     args = parser.parse_args()
     num_epoch = args.num_epoch
@@ -94,6 +95,7 @@ def main():
     checkpoint_filepath = args.checkpoint_filepath
     inference_img_dirpath = args.inference_img_dirpath
     training_img_dirpath = args.training_img_dirpath
+    batch_size = args.batch_size
 
     logging.info('######### Parameters #########')
     logging.info('Number of epochs: ' + str(num_epoch))
@@ -121,7 +123,7 @@ def main():
                                     transform=transforms.Compose([transforms.ToTensor()]), normaliser=1,
                                     is_inference=True)
 
-        inference_data_loader = torch.utils.data.DataLoader(inference_dataset, batch_size=1, shuffle=False,
+        inference_data_loader = torch.utils.data.DataLoader(inference_dataset, batch_size=batch_size, shuffle=False,
                                                             num_workers=10)
 
         '''
@@ -160,11 +162,11 @@ def main():
         testing_data_dict = testing_data_loader.load_data()
         testing_dataset = Dataset(data_dict=testing_data_dict, normaliser=1,is_valid=True)
 
-        training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=1, shuffle=True,
+        training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True,
                                                        num_workers=6)
-        testing_data_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=1, shuffle=False,
+        testing_data_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=batch_size, shuffle=False,
                                                       num_workers=6)
-        validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=1,
+        validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size,
                                                          shuffle=False,
                                                          num_workers=6)
    
@@ -219,7 +221,6 @@ def main():
         examples = 0
         psnr_avg = 0.0
         ssim_avg = 0.0
-        batch_size = 1
         total_examples = 0
 
         for epoch in range(start_epoch,num_epoch):
@@ -250,11 +251,11 @@ def main():
                 loss.backward()
                 optimizer.step()
 
-                running_loss += loss.data[0]
+                running_loss += loss.data.item()
                 examples += batch_size
                 total_examples+=batch_size
 
-                writer.add_scalar('Loss/train', loss.data[0], total_examples)
+                writer.add_scalar('Loss/train', loss.data.item(), total_examples)
 
             logging.info('[%d] train loss: %.15f' %
                          (epoch + 1, running_loss / examples))
@@ -286,10 +287,10 @@ def main():
                 loss = criterion(net_img_batch,
                                  gt_img_batch, gradient_regulariser)
 
-                running_loss += loss.data[0]
+                running_loss += loss.data.item()
                 examples += batch_size
                 total_examples+=batch_size
-                writer.add_scalar('Loss/train', loss.data[0], total_examples)
+                writer.add_scalar('Loss/train', loss.data.item(), total_examples)
 
 
             logging.info('[%d] valid loss: %.15f' %
