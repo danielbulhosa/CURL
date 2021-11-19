@@ -237,6 +237,14 @@ class CURLLoss(nn.Module):
 class CURLLayer(nn.Module):
 
     import torch.nn.functional as F
+    
+    converter_map = {
+        ('rgb', 'lab'): ImageProcessing.rgb_to_lab,
+        ('lab', 'rgb'): ImageProcessing.lab_to_rgb,
+        ('rgb', 'hsv'): ImageProcessing.rgb_to_hsv,
+        ('hsv', 'rgb'): ImageProcessing.hsv_to_rgb
+        
+    }
 
     def __init__(self, num_in_channels=64, num_out_channels=64):
         """Initialisation of class
@@ -260,42 +268,21 @@ class CURLLayer(nn.Module):
         :rtype: N/A
 
         """
-        self.lab_layer1 = ConvBlock(64, 64)
-        self.lab_layer2 = MaxPoolBlock()
-        self.lab_layer3 = ConvBlock(64, 64)
-        self.lab_layer4 = MaxPoolBlock()
-        self.lab_layer5 = ConvBlock(64, 64)
-        self.lab_layer6 = MaxPoolBlock()
-        self.lab_layer7 = ConvBlock(64, 64)
-        self.lab_layer8 = GlobalPoolingBlock(2)
-
-        self.fc_lab = torch.nn.Linear(64, 48)
-
-        self.dropout1 = nn.Dropout(0.5)
-        self.dropout2 = nn.Dropout(0.5)
-        self.dropout3 = nn.Dropout(0.5)
-
-        self.rgb_layer1 = ConvBlock(64, 64)
-        self.rgb_layer2 = MaxPoolBlock()
-        self.rgb_layer3 = ConvBlock(64, 64)
-        self.rgb_layer4 = MaxPoolBlock()
-        self.rgb_layer5 = ConvBlock(64, 64)
-        self.rgb_layer6 = MaxPoolBlock()
-        self.rgb_layer7 = ConvBlock(64, 64)
-        self.rgb_layer8 = GlobalPoolingBlock(2)
-
-        self.fc_rgb = torch.nn.Linear(64, 48)
-
-        self.hsv_layer1 = ConvBlock(64, 64)
-        self.hsv_layer2 = MaxPoolBlock()
-        self.hsv_layer3 = ConvBlock(64, 64)
-        self.hsv_layer4 = MaxPoolBlock()
-        self.hsv_layer5 = ConvBlock(64, 64)
-        self.hsv_layer6 = MaxPoolBlock()
-        self.hsv_layer7 = ConvBlock(64, 64)
-        self.hsv_layer8 = GlobalPoolingBlock(2)
-
-        self.fc_hsv = torch.nn.Linear(64, 64)
+        self.lab_stack = ConvStack(conv_in=64, conv_out=64, curve_out=48, dropout=0.5)
+        self.rgb_stack = ConvStack(conv_in=64, conv_out=64, curve_out=48, dropout=0.5)
+        self.hsv_stack = ConvStack(conv_in=64, conv_out=64, curve_out=64, dropout=0.5)
+        
+    def convert(self, img, source, target):            
+        img = torch.clamp(img, 0.0, 1.0)    
+        converter = self.converter_map.get((source, target))
+        
+        if converter is None:
+            ValueError("`source` and `target` must be one of: {}".format(self.converter_map.keys()))
+        
+        new_img = converter(img)
+        new_img = torch.clamp(new_img, 0.0, 1.0)
+        
+        return new_img
 
     def forward(self, x):
         """Forward function for the CURL layer
@@ -317,177 +304,75 @@ class CURLLayer(nn.Module):
         torch.cuda.empty_cache()
         shape = x.shape
 
-        img_clamped = torch.clamp(img, 0.0, 1.0)
-        img_lab = torch.clamp(ImageProcessing.rgb_to_lab(
-            img_clamped), 0.0, 1.0)
+        # RGB -> LAB, modify LAB
+        img_lab = self.convert(img, 'rgb', 'lab')
         feat_lab = torch.cat((feat, img_lab), 1)
+        L = self.lab_stack(feat_lab)
+        img_lab, gradient_regulariser_lab = ImageProcessing.adjust_lab(img_lab, L[:, 0:48])
         
-        x = self.lab_layer1(feat_lab)
-        del feat_lab
-        x = self.lab_layer2(x)
-        x = self.lab_layer3(x)
-        x = self.lab_layer4(x)
-        x = self.lab_layer5(x)
-        x = self.lab_layer6(x)
-        x = self.lab_layer7(x)
-        x = self.lab_layer8(x)
-        x = x.view(x.size()[0], -1)
-        x = self.dropout1(x)
-        L = self.fc_lab(x)
-
-        img_lab, gradient_regulariser_lab = ImageProcessing.adjust_lab(
-            img_lab, L[:, 0:48])
-        img_rgb = ImageProcessing.lab_to_rgb(img_lab)
-        img_rgb = torch.clamp(img_rgb, 0.0, 1.0)
+        # LAB -> RGB, modify RGB
+        img_rgb = self.convert(img_lab, 'lab', 'rgb')
         feat_rgb = torch.cat((feat, img_rgb), 1)
-
-        x = self.rgb_layer1(feat_rgb)
-        x = self.rgb_layer2(x)
-        x = self.rgb_layer3(x)
-        x = self.rgb_layer4(x)
-        x = self.rgb_layer5(x)
-        x = self.rgb_layer6(x)
-        x = self.rgb_layer7(x)
-        x = self.rgb_layer8(x)
-        x = x.view(x.size()[0], -1)
-        x = self.dropout2(x)
-        R = self.fc_rgb(x)
-
-        img_rgb, gradient_regulariser_rgb = ImageProcessing.adjust_rgb(
-            img_rgb, R[:, 0:48])
-        img_hsv = ImageProcessing.rgb_to_hsv(img_rgb)
+        R = self.rgb_stack(feat_rgb)
+        img_rgb, gradient_regulariser_rgb = ImageProcessing.adjust_rgb(img_rgb, R[:, 0:48])
         
-        img_hsv = torch.clamp(img_hsv, 0.0, 1.0)
+        # RGB -> HSV, modify HSV
+        img_hsv = self.convert(img_rgb, 'rgb', 'hsv')
         feat_hsv = torch.cat((feat, img_hsv), 1)
-
-        x = self.hsv_layer1(feat_hsv)
-        del feat_hsv
-        x = self.hsv_layer2(x)
-        x = self.hsv_layer3(x)
-        x = self.hsv_layer4(x)
-        x = self.hsv_layer5(x)
-        x = self.hsv_layer6(x)
-        x = self.hsv_layer7(x)
-        x = self.hsv_layer8(x)
-        x = x.view(x.size()[0], -1)
-        x = self.dropout3(x)
-        H = self.fc_hsv(x)
-
-        img_hsv, gradient_regulariser_hsv = ImageProcessing.adjust_hsv(
-            img_hsv, H[:, 0:64])
-        img_hsv = torch.clamp(img_hsv, 0.0, 1.0)
-
-        img_residual = torch.clamp(ImageProcessing.hsv_to_rgb(
-           img_hsv), 0.0, 1.0)
-
+        H = self.hsv_stack(feat_hsv)
+        img_hsv, gradient_regulariser_hsv = ImageProcessing.adjust_hsv(img_hsv, H[:, 0:64])
+        
+        # HSV -> RGB, calculate residual and final image
+        img_residual = self.convert(img_hsv, 'hsv', 'rgb')
         img = torch.clamp(img + img_residual, 0.0, 1.0)
+        
         gradient_regulariser = gradient_regulariser_rgb + \
             gradient_regulariser_lab+gradient_regulariser_hsv
 
         return img, gradient_regulariser
 
 
-class Block(nn.Module):
+class ConvBlock(nn.Module):
 
-    def __init__(self):
-        """Initialisation for a lower-level DeepLPF conv block
-
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        super(Block, self).__init__()
-
-    def conv3x3(self, in_channels, out_channels, stride=1):
-        """Represents a convolution of shape 3x3
-
-        :param in_channels: number of input channels
-        :param out_channels: number of output channels
-        :param stride: the convolution stride
-        :returns: convolution function with the specified parameterisation
-        :rtype: function
-
-        """
-        return nn.Conv2d(in_channels, out_channels, kernel_size=3,
-                         stride=stride, padding=1, bias=True)
-
-
-class ConvBlock(Block, nn.Module):
-
-    def __init__(self, num_in_channels, num_out_channels, stride=1):
-        """Initialise function for the higher level convolution block
-
-        :param in_channels:
-        :param out_channels:
-        :param stride:
-        :param padding:
-        :returns:
-        :rtype:
-
-        """
-        super(Block, self).__init__()
-        self.conv = self.conv3x3(num_in_channels, num_out_channels, stride=2)
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3,
+                              stride=stride, padding=1, bias=True)
         self.lrelu = nn.LeakyReLU()
 
     def forward(self, x):
-        """ Forward function for the higher level convolution block
-
-        :param x: Tensor representing the input BxCxWxH, where B is the batch size, C is the number of channels, W and H are the width and image height
-        :returns: Tensor representing the output of the block
-        :rtype: Tensor
-
-        """
-        img_out = self.lrelu(self.conv(x))
-        return img_out
-
-
-class MaxPoolBlock(Block, nn.Module):
-
-    def __init__(self):
-        """Initialise function for the max pooling block
-
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        super(Block, self).__init__()
-
-        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
-
-    def forward(self, x):
-        """ Forward function for the max pooling block
-
-        :param x: Tensor representing the input BxCxWxH, where B is the batch size, C is the number of channels, W and H are the width and image height
-        :returns: Tensor representing the output of the block
-        :rtype: Tensor
-
-        """
-        img_out = self.max_pool(x)
-        return img_out
-
-
-class GlobalPoolingBlock(Block, nn.Module):
-
-    def __init__(self, receptive_field):
-        """Implementation of the global pooling block. Takes the average over a 2D receptive field.
-        :param receptive_field:
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        super(Block, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-
-    def forward(self, x):
-        """Forward function for the high-level global pooling block
-
-        :param x: Tensor of shape BxCxAxA
-        :returns: Tensor of shape BxCx1x1, where B is the batch size
-        :rtype: Tensor
-
-        """
-        out = self.avg_pool(x)
-        return out
+        return self.lrelu(self.conv(x))
+    
+class ConvStack(nn.Module):
+    
+    def __init__(self, conv_in=64, conv_out=64, curve_out=48, dropout=0.5):
+        super(ConvStack, self).__init__()
+        self.layer1 = ConvBlock(conv_in, conv_out)
+        self.layer2 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.layer3 = ConvBlock(conv_in, conv_out)
+        self.layer4 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.layer5 = ConvBlock(conv_in, conv_out)
+        self.layer6 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.layer7 = ConvBlock(conv_in, conv_out)
+        self.layer8 = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(0.5)
+        self.fc = torch.nn.Linear(conv_in, curve_out)
+        
+    def forward(self, feat_maps):
+        x = self.layer1(feat_maps)
+        del feat_maps
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer5(x)
+        x = self.layer6(x)
+        x = self.layer7(x)
+        x = self.layer8(x)
+        x = x.view(x.size()[0], -1)
+        x = self.dropout(x)
+        C = self.fc(x)
+        
+        return C
 
 
 class CURLNet(nn.Module):
