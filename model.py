@@ -29,7 +29,7 @@ np.set_printoptions(threshold=sys.maxsize)
 
 class CURLLoss(nn.Module):
 
-    def __init__(self, ssim_window_size=5, alpha=0.5):
+    def __init__(self, ssim_window_size=5, alpha=0.5, num_channel=1):
         """Initialisation of the DeepLPF loss function
 
         :param ssim_window_size: size of averaging window for SSIM
@@ -41,8 +41,12 @@ class CURLLoss(nn.Module):
         super(CURLLoss, self).__init__()
         self.alpha = alpha
         self.ssim_window_size = ssim_window_size
+        self.num_channel = num_channel
+        self.window = CURLLoss.create_window(self.ssim_window_size, self.num_channel)
 
-    def create_window(self, window_size, num_channel):
+
+    @staticmethod
+    def create_window(window_size, num_channel):
         """Window creation function for SSIM metric. Gaussian weights are applied to the window.
         Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
 
@@ -52,14 +56,15 @@ class CURLLoss(nn.Module):
         :rtype: Tensor
 
         """
-        _1D_window = self.gaussian(window_size, 1.5).unsqueeze(1)
+        _1D_window = CURLLoss.gaussian(window_size, 1.5).unsqueeze(1)
         _2D_window = _1D_window.mm(
             _1D_window.t()).float().unsqueeze(0).unsqueeze(0)
         window = Variable(_2D_window.expand(
             num_channel, 1, window_size, window_size).contiguous())
         return window
 
-    def gaussian(self, window_size, sigma):
+    @staticmethod
+    def gaussian(window_size, sigma):
         """
         Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
         :param window_size: size of the SSIM sampling window e.g. 11
@@ -69,7 +74,7 @@ class CURLLoss(nn.Module):
 
         """
         gauss = torch.Tensor(
-            [exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
+            [exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)]).cuda()
         return gauss / gauss.sum()
 
     def compute_ssim(self, img1, img2):
@@ -82,28 +87,23 @@ class CURLLoss(nn.Module):
         :rtype: float
 
         """
-        (_, num_channel, _, _) = img1.size()
-        window = self.create_window(self.ssim_window_size, num_channel)
-
-        if img1.is_cuda:
-            window = window.cuda(img1.get_device())
-            window = window.type_as(img1)
+        window = self.window.type_as(img1)
 
         mu1 = F.conv2d(
-            img1, window, padding=self.ssim_window_size // 2, groups=num_channel)
+            img1, window, padding=self.ssim_window_size // 2, groups=self.num_channel)
         mu2 = F.conv2d(
-            img2, window, padding=self.ssim_window_size // 2, groups=num_channel)
+            img2, window, padding=self.ssim_window_size // 2, groups=self.num_channel)
 
         mu1_sq = mu1.pow(2)
         mu2_sq = mu2.pow(2)
         mu1_mu2 = mu1 * mu2
 
         sigma1_sq = F.conv2d(
-            img1 * img1, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu1_sq
+            img1 * img1, window, padding=self.ssim_window_size // 2, groups=self.num_channel) - mu1_sq
         sigma2_sq = F.conv2d(
-            img2 * img2, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu2_sq
+            img2 * img2, window, padding=self.ssim_window_size // 2, groups=self.num_channel) - mu2_sq
         sigma12 = F.conv2d(
-            img1 * img2, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu1_mu2
+            img1 * img2, window, padding=self.ssim_window_size // 2, groups=self.num_channel) - mu1_mu2
 
         C1 = 0.01 ** 2
         C2 = 0.03 ** 2
