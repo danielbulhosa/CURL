@@ -293,13 +293,10 @@ class CURLLayer(nn.Module):
         '''
         This function is where the magic happens :)
         '''
-        x.contiguous()  # remove memory holes
-
+        
+        x.contiguous()  # remove memory holes        
         feat = x[:, 3:64, :, :]
         img = x[:, 0:3, :, :]
-
-        torch.cuda.empty_cache()
-        shape = x.shape
 
         # RGB -> LAB, modify LAB
         img_lab = self.convert(img, 'rgb', 'lab')
