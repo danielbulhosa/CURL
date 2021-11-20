@@ -24,7 +24,38 @@ np.set_printoptions(threshold=sys.maxsize)
 
 
 class ImageProcessing(object):
+    
+    rgb_to_xyz = Variable(torch.FloatTensor(
+        [  # X        Y          Z
+            [0.412453, 0.212671, 0.019334],  # R
+            [0.357580, 0.715160, 0.119193],  # G
+            [0.180423, 0.072169, 0.950227],  # B
+        ]), requires_grad=False).cuda()
+    
+    fxfyfz_to_lab = Variable(torch.FloatTensor(
+        [
+            [0.0,  500.0,    0.0],  # fx
+            [116.0, -500.0,  200.0],  # fy
+            [0.0,    0.0, -200.0],  # fz
+        ]), requires_grad=False).cuda()
 
+    lab_to_fxfyfz = Variable(torch.FloatTensor(
+        [   # X       Y         Z
+            [1/116.0, 1/116.0, 1/116.0],  # R
+            [1/500.0, 0, 0],  # G
+            [0, 0, -1/200.0],  # B
+        ]), requires_grad=False).cuda()
+    
+    xyz_to_rgb = Variable(torch.FloatTensor(
+        [   # X          Y           Z
+            [3.2404542, -0.9692660,  0.0556434],  # R
+            [-1.5371385,  1.8760108, -0.2040259],  # G
+            [-0.4985314,  0.0415560,  1.0572252],  # B
+        ]), requires_grad=False).cuda()
+    
+    lab_to_fxfyfz_offset = Variable(torch.FloatTensor([16.0, 0.0, 0.0]), requires_grad=False).reshape(1, 3, 1, 1).cuda()
+    xyz_to_rgb_mult = Variable(torch.FloatTensor([0.950456, 1.0, 1.088754]), requires_grad=False).reshape(1, 3, 1, 1).cuda()
+    
     @staticmethod
     def rgb_to_lab(img, is_training=True):
         """ PyTorch implementation of RGB to LAB conversion: https://docs.opencv.org/3.3.0/de/d25/imgproc_color_conversions.html
@@ -39,16 +70,8 @@ class ImageProcessing(object):
         img = (img / 12.92) * img.le(0.04045).float() + (((torch.clamp(img,
                                                                        min=0.0001) + 0.055) / 1.055) ** 2.4) * img.gt(0.04045).float()
 
-        rgb_to_xyz = Variable(torch.FloatTensor([  # X        Y          Z
-            [0.412453, 0.212671, 0.019334],  # R
-            [0.357580, 0.715160, 0.119193],  # G
-            [0.180423, 0.072169,
-             0.950227],  # B
-        ]), requires_grad=False).cuda()
-
-        img = torch.einsum('bcxy,ck->bkxy', img, rgb_to_xyz)
-        img = torch.mul(img, Variable(torch.FloatTensor(
-            [1/0.950456, 1.0, 1/1.088754]), requires_grad=False).cuda().reshape(1, 3, 1, 1))
+        img = torch.einsum('bcxy,ck->bkxy', img, ImageProcessing.rgb_to_xyz)
+        img = torch.mul(img, 1/ImageProcessing.xyz_to_rgb_mult)
 
         epsilon = 6/29
 
@@ -56,15 +79,7 @@ class ImageProcessing(object):
             (torch.clamp(img, min=0.0001) **
              (1.0/3.0) * img.gt(epsilon**3).float())
 
-        fxfyfz_to_lab = Variable(torch.FloatTensor([[0.0,  500.0,    0.0],  # fx
-                                                    # fy
-                                                    [116.0, -500.0,  200.0],
-                                                    # fz
-                                                    [0.0,    0.0, -200.0],
-                                                    ]), requires_grad=False).cuda()
-
-        img = torch.einsum('bcxy,ck->bkxy', img, fxfyfz_to_lab) + Variable(
-            torch.FloatTensor([-16.0, 0.0, 0.0]).reshape(1, 3, 1, 1), requires_grad=False).cuda()
+        img = torch.einsum('bcxy,ck->bkxy', img, ImageProcessing.fxfyfz_to_lab) - ImageProcessing.lab_to_fxfyfz_offset
 
         '''
         L_chan: black and white with input range [0, 100]
@@ -78,7 +93,7 @@ class ImageProcessing(object):
         #img[(img != img).detach()] = 0  # This line causes memory error
 
         img = img.contiguous()
-        return img.cuda()
+        return img
 
     @staticmethod
     def lab_to_rgb(img, is_training=True):
@@ -95,18 +110,12 @@ class ImageProcessing(object):
         img_copy[:, 1, :, :] = ((img[:, 1, :, :] * 2)-1)*110
         img_copy[:, 2, :, :] = ((img[:, 2, :, :] * 2)-1)*110
 
-        img = img_copy.clone().cuda()
+        img = img_copy.clone()
         del img_copy
 
-        lab_to_fxfyfz = Variable(torch.FloatTensor([  # X Y Z
-            [1/116.0, 1/116.0, 1/116.0],  # R
-            [1/500.0, 0, 0],  # G
-            [0, 0, -1/200.0],  # B
-        ]), requires_grad=False).cuda()
-
         img = torch.einsum('bcxy,ck->bkxy', 
-                           img + Variable(torch.FloatTensor([16.0, 0.0, 0.0]).cuda()).reshape(1, 3, 1, 1), 
-                           lab_to_fxfyfz)
+                           img + ImageProcessing.lab_to_fxfyfz_offset, 
+                           ImageProcessing.lab_to_fxfyfz)
 
         epsilon = 6.0/29.0
 
@@ -114,16 +123,9 @@ class ImageProcessing(object):
                ((torch.clamp(img, min=0.0001)**3.0) * img.gt(epsilon).float()))
 
         # denormalize for D65 white point
-        img = torch.mul(img, Variable(
-            torch.FloatTensor([0.950456, 1.0, 1.088754]).cuda().reshape(1, 3, 1, 1)))
+        img = torch.mul(img, ImageProcessing.xyz_to_rgb_mult)
 
-        xyz_to_rgb = Variable(torch.FloatTensor([  # X Y Z
-            [3.2404542, -0.9692660,  0.0556434],  # R
-            [-1.5371385,  1.8760108, -0.2040259],  # G
-            [-0.4985314,  0.0415560,  1.0572252],  # B
-        ]), requires_grad=False).cuda()
-
-        img = torch.einsum('bcxy,ck->bkxy', img, xyz_to_rgb)
+        img = torch.einsum('bcxy,ck->bkxy', img, ImageProcessing.xyz_to_rgb)
         img = (img * 12.92 * img.le(0.0031308).float()) + ((torch.clamp(img,
                                                                         min=0.0001) ** (1/2.4) * 1.055) - 0.055) * img.gt(0.0031308).float()
 
@@ -314,19 +316,14 @@ class ImageProcessing(object):
         mx = torch.max(img, 1)[0]
         mn = torch.min(img, 1)[0]
 
-        ones = Variable(torch.FloatTensor(
-            torch.ones(mn.shape))).cuda()
-        zero = Variable(torch.FloatTensor(torch.zeros(mn.shape))).cuda()
+        ones = Variable(torch.ones(mn.shape, device=torch.device('cuda'), dtype=torch.float))
+        zero = Variable(torch.zeros(mn.shape, device=torch.device('cuda'), dtype=torch.float))
         df = torch.add(mx, torch.mul(ones*-1, mn))
 
-        img = img.cuda()
-        df = df.cuda()
-        mx = mx.cuda()
-
         # Each channel is shape (b, x, y) tensor
-        r = img[:, 0, :, :].clone().cuda()
-        g = img[:, 1, :, :].clone().cuda()
-        b = img[:, 2, :, :].clone().cuda()
+        r = img[:, 0, :, :].clone()
+        g = img[:, 1, :, :].clone()
+        b = img[:, 2, :, :].clone()
 
         img_copy = img.clone()
         
@@ -335,7 +332,7 @@ class ImageProcessing(object):
                          * g.eq(mx).float() + (4.0+(r-g)/df)*b.eq(mx).float())
         img_copy[:, 0, :, :] = img_copy[:, 0, :, :]*60.0
 
-        zero = zero.cuda()
+        zero = zero
         img_copy2 = img_copy.clone()
 
         img_copy2[:, 0, :, :] = img_copy[:, 0, :, :].lt(zero).float(
@@ -369,7 +366,6 @@ class ImageProcessing(object):
         :rtype: Tensor
 
         """
-        slope = Variable(torch.zeros((C.shape[0], C.shape[1]-1))).cuda()
         curve_steps = C.shape[1]-1
 
         '''
@@ -385,7 +381,7 @@ class ImageProcessing(object):
         '''
         Use predicted line segments to compute scaling factors for the channel
         '''
-        steps = torch.arange(0, slope.shape[1]-1).cuda()
+        steps = torch.arange(0, slope.shape[1]-1, device=torch.device('cuda'))
         image_channel = torch.unsqueeze(img[:, channel_in, :, :], 1)  # expand dims to broadcast
         scale = C[:, 0].reshape(-1, 1, 1) + (slope[:, :-1].reshape(slope.shape[0], slope.shape[1] - 1, 1, 1) * 
                            (curve_steps * image_channel - steps.reshape(1, steps.shape[0], 1, 1))).sum(1)  # eq. 1
@@ -412,7 +408,7 @@ class ImageProcessing(object):
         S1, S2, S3, S4 = torch.chunk(S, 4, dim=1)
         S1, S2, S3, S4 = torch.exp(S1), torch.exp(S2), torch.exp(S3), torch.exp(S4)
 
-        slope_sqr_diff = Variable(torch.zeros(batch_dim)*0.0).cuda()
+        slope_sqr_diff = Variable(torch.zeros(batch_dim, device=torch.device('cuda'))*0.0)
 
         '''
         Adjust Hue channel based on Hue using the predicted curve
@@ -469,7 +465,7 @@ class ImageProcessing(object):
         '''
         Apply the curve to the R channel 
         '''
-        slope_sqr_diff = Variable(torch.zeros(batch_dim)*0.0).cuda()
+        slope_sqr_diff = Variable(torch.zeros(batch_dim, device=torch.device('cuda'))*0.0)
 
         img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
             img, R1, slope_sqr_diff, channel_in=0, channel_out=0)
@@ -515,7 +511,7 @@ class ImageProcessing(object):
         L1, L2, L3 = torch.chunk(L, 3, dim=1)
         L1, L2, L3 = torch.exp(L1), torch.exp(L2), torch.exp(L3)
 
-        slope_sqr_diff = Variable(torch.zeros(batch_dim)*0.0).cuda()
+        slope_sqr_diff = Variable(torch.zeros(batch_dim, device=torch.device('cuda'))*0.0)
 
         '''
         Apply the curve to the L channel 
