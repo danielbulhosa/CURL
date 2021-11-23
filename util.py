@@ -90,8 +90,6 @@ class ImageProcessing(object):
         img[:, 1, :, :] = (img[:, 1, :, :]/110 + 1)/2
         img[:, 2, :, :] = (img[:, 2, :, :]/110 + 1)/2
         
-        #img[(img != img).detach()] = 0  # This line causes memory error
-
         img = img.contiguous()
         return img
 
@@ -104,14 +102,10 @@ class ImageProcessing(object):
         :rtype: Tensor
         """                
         img = img.contiguous()
-        img_copy = img.clone()
 
-        img_copy[:, 0, :, :] = img[:, 0, :, :] * 100
-        img_copy[:, 1, :, :] = ((img[:, 1, :, :] * 2)-1)*110
-        img_copy[:, 2, :, :] = ((img[:, 2, :, :] * 2)-1)*110
-
-        img = img_copy.clone()
-        del img_copy
+        img[:, 0, :, :] = img[:, 0, :, :] * 100
+        img[:, 1, :, :] = ((img[:, 1, :, :] * 2)-1)*110
+        img[:, 2, :, :] = ((img[:, 2, :, :] * 2)-1)*110
 
         img = torch.einsum('bcxy,ck->bkxy', 
                            img + ImageProcessing.lab_to_fxfyfz_offset, 
@@ -130,7 +124,6 @@ class ImageProcessing(object):
                                                                         min=0.0001) ** (1/2.4) * 1.055) - 0.055) * img.gt(0.0031308).float()
 
         img = img.contiguous()
-        #img[(img != img).detach()] = 0 # This line causes memory error
         
         return img
 
@@ -269,6 +262,7 @@ class ImageProcessing(object):
 
         r = img[:, 2, :, :]+torch.clamp(img[:, 0, :, :]*360-0, 0.0, 60.0)*m1+torch.clamp(img[:, 0, :, :]*360-60, 0.0, 60.0)*m2+torch.clamp(
             img[:, 0, :, :]*360-120, 0.0, 120.0)*m3+torch.clamp(img[:, 0, :, :]*360-240, 0.0, 60.0)*m4+torch.clamp(img[:, 0, :, :]*360-300, 0.0, 60.0)*m5
+        del m1, m2, m3, m4, m5
 
         m1 = (img[:, 2, :, :]-img[:, 2, :, :]*(1-img[:, 1, :, :]))/60
         m2 = 0
@@ -277,6 +271,7 @@ class ImageProcessing(object):
 
         g = img[:, 2, :, :]*(1-img[:, 1, :, :])+torch.clamp(img[:, 0, :, :]*360-0, 0.0, 60.0)*m1+torch.clamp(img[:, 0, :, :]*360-60,
             0.0, 120.0)*m2+torch.clamp(img[:, 0, :, :]*360-180, 0.0, 60.0)*m3+torch.clamp(img[:, 0, :, :]*360-240, 0.0, 120.0)*m4
+        del m1, m2, m3, m4
 
         m1 = 0
         m2 = (img[:, 2, :, :]-img[:, 2, :, :]*(1-img[:, 1, :, :]))/60
@@ -285,8 +280,10 @@ class ImageProcessing(object):
 
         b = img[:, 2, :, :]*(1-img[:, 1, :, :])+torch.clamp(img[:, 0, :, :]*360-0, 0.0, 120.0)*m1+torch.clamp(img[:, 0, :, :]*360 -
             120, 0.0, 60.0)*m2+torch.clamp(img[:, 0, :, :]*360-180, 0.0, 120.0)*m3+torch.clamp(img[:, 0, :, :]*360-300, 0.0, 60.0)*m4
+        del m1, m2, m3, m4
 
         img = torch.stack((r, g, b), 1)
+        del r, g, b
         #img[(img != img).detach()] = 0 # This causes memory error
 
         img = img.contiguous()
@@ -321,35 +318,24 @@ class ImageProcessing(object):
         df = torch.add(mx, torch.mul(ones*-1, mn))
 
         # Each channel is shape (b, x, y) tensor
-        r = img[:, 0, :, :].clone()
-        g = img[:, 1, :, :].clone()
-        b = img[:, 2, :, :].clone()
-
-        img_copy = img.clone()
+        r, g, b = img[:, 0, :, :], img[:, 1, :, :], img[:, 2, :, :]
         
         # New channel 0, hue
-        img_copy[:, 0, :, :] = (((g-b)/df)*r.eq(mx).float() + (2.0+(b-r)/df)
-                         * g.eq(mx).float() + (4.0+(r-g)/df)*b.eq(mx).float())
-        img_copy[:, 0, :, :] = img_copy[:, 0, :, :]*60.0
+        img[:, 0, :, :] = (((g-b)/df)*r.eq(mx).float() + (2.0+(b-r)/df)
+                           * g.eq(mx).float() + (4.0+(r-g)/df)*b.eq(mx).float())
+        img[:, 0, :, :] = img[:, 0, :, :]*60.0
 
-        zero = zero
-        img_copy2 = img_copy.clone()
+        img[:, 0, :, :] = img[:, 0, :, :].lt(zero).float(
+        )*(img[:, 0, :, :]+360) + img[:, 0, :, :].ge(zero).float()*(img[:, 0, :, :])
 
-        img_copy2[:, 0, :, :] = img_copy[:, 0, :, :].lt(zero).float(
-        )*(img_copy[:, 0, :, :]+360) + img_copy[:, 0, :, :].ge(zero).float()*(img_copy[:, 0, :, :])
+        img[:, 0, :, :] = img[:, 0, :, :]/360
 
-        img_copy2[:, 0, :, :] = img_copy2[:, 0, :, :]/360
-
-        del img, r, g, b
 
         # Set saturation and value, remaining channels
-        img_copy2[:, 1, :, :] = mx.ne(zero).float()*(df/mx) + \
+        img[:, 1, :, :] = mx.ne(zero).float()*(df/mx) + \
             mx.eq(zero).float()*(zero)
-        img_copy2[:, 2, :, :] = mx
+        img[:, 2, :, :] = mx
         
-        #img_copy2[(img_copy2 != img_copy2).detach()] = 0 # This line causes memory error
-
-        img = img_copy2.clone()
         img = torch.clamp(img, 10**(-9), 1.0)
 
         return img
@@ -437,8 +423,6 @@ class ImageProcessing(object):
         img = img_copy.clone()
         del img_copy
 
-        #img[(img != img).detach()] = 0 # This line causes memory error
-
         img = img.contiguous()
         
         return img, slope_sqr_diff
@@ -484,8 +468,6 @@ class ImageProcessing(object):
 
         img = img_copy.clone()
         del img_copy
-
-        #img[(img != img).detach()] = 0 # This line causes memory error
 
         img = img.contiguous()
 
@@ -533,8 +515,6 @@ class ImageProcessing(object):
 
         img = img_copy.clone()
         del img_copy
-
-        #img[(img != img).detach()] = 0 # This line causes memory error
 
         img = img.contiguous()
 
