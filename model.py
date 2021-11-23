@@ -326,7 +326,7 @@ class CURLLayer(nn.Module):
         img = torch.clamp(img + img_residual, 0.0, 1.0)
         
         gradient_regulariser = (gradient_regulariser_rgb +
-                                gradient_regulariser_lab+\
+                                gradient_regulariser_lab +
                                 gradient_regulariser_hsv)
 
         return img, gradient_regulariser
