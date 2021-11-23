@@ -39,7 +39,6 @@ every 250 epochs, and the total number of epochs for training will be 10,000.
 
 '''
 
-from data import Adobe5kDataLoader, Dataset
 import time
 import torch
 import torchvision.transforms as transforms
@@ -59,6 +58,7 @@ from torch.utils.tensorboard import SummaryWriter
 np.set_printoptions(threshold=sys.maxsize)
 
 def main():
+    import data  # FIXME - import not picked up unless in main scope. Why?
 
     writer = SummaryWriter()
 
@@ -103,8 +103,7 @@ def main():
     logging.info('Dump validation accuracy every: ' + str(valid_every))
     logging.info('Training image directory: ' + str(training_img_dirpath))
     logging.info('##############################')
-
-
+    
     if (checkpoint_filepath is not None) and (inference_img_dirpath is not None):
 
         '''
@@ -116,12 +115,13 @@ def main():
                                 a1242.tif
                                 etc
         '''
-        inference_data_loader = Adobe5kDataLoader(data_dirpath=inference_img_dirpath,
-                                                  img_ids_filepath=inference_img_dirpath+"/images_inference.txt")
-        inference_data_dict = inference_data_loader.load_data()
-        inference_dataset = Dataset(data_dict=inference_data_dict,
-                                    transform=transforms.Compose([transforms.ToTensor()]), normaliser=1,
-                                    is_inference=True)
+        data_dict = data.get_data_dict(inference_img_dirpath)
+        inference_ids = data.get_data_ids(inference_img_dirpath+"/images_inference.txt")
+        inference_data_dict = data.filter_data_dict(data_dict, inference_ids)
+        
+        inference_dataset = data.Dataset(data_dict=inference_data_dict,
+                                         transform=transforms.Compose([transforms.ToTensor()]), normaliser=1,
+                                         is_inference=True)
 
         inference_data_loader = torch.utils.data.DataLoader(inference_dataset, batch_size=batch_size, shuffle=False,
                                                             num_workers=10)
@@ -146,31 +146,28 @@ def main():
 
     else:
         
-        training_data_loader = Adobe5kDataLoader(data_dirpath=training_img_dirpath,
-                                                 img_ids_filepath=training_img_dirpath+"/images_train.txt")
-        training_data_dict = training_data_loader.load_data()
-
-        training_dataset = Dataset(data_dict=training_data_dict, normaliser=1, is_valid=False)
-
-        validation_data_loader = Adobe5kDataLoader(data_dirpath=training_img_dirpath,
-                                               img_ids_filepath=training_img_dirpath+"/images_valid.txt")
-        validation_data_dict = validation_data_loader.load_data()
-        validation_dataset = Dataset(data_dict=validation_data_dict, normaliser=1, is_valid=True)
-
-        testing_data_loader = Adobe5kDataLoader(data_dirpath=training_img_dirpath,
-                                            img_ids_filepath=training_img_dirpath+"/images_test.txt")
-        testing_data_dict = testing_data_loader.load_data()
-        testing_dataset = Dataset(data_dict=testing_data_dict, normaliser=1,is_valid=True)
+        data_dict = data.get_data_dict(training_img_dirpath)
+        
+        training_ids = data.get_data_ids(training_img_dirpath+"/images_train.txt")
+        valid_ids = data.get_data_ids(training_img_dirpath+"/images_valid.txt")
+        test_ids = data.get_data_ids(training_img_dirpath+"/images_test.txt")
+        
+        training_data_dict = data.filter_data_dict(data_dict, training_ids)
+        validation_data_dict = data.filter_data_dict(data_dict, valid_ids)
+        testing_data_dict = data.filter_data_dict(data_dict, test_ids)
+        
+        training_dataset = data.Dataset(data_dict=training_data_dict, normaliser=1, is_valid=False)
+        validation_dataset = data.Dataset(data_dict=validation_data_dict, normaliser=1, is_valid=True)
+        testing_dataset = data.Dataset(data_dict=testing_data_dict, normaliser=1,is_valid=True)
 
         training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True,
-                                                       num_workers=6)
+                                                           pin_memory=True, num_workers=6)
         testing_data_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=batch_size, shuffle=False,
-                                                      num_workers=6)
-        validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size,
-                                                         shuffle=False,
-                                                         num_workers=6)
+                                                          pin_memory=True, num_workers=6)
+        validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
+                                                             pin_memory=True, num_workers=6)
    
-        net = model.CURLNet()
+        net = model.CURLGlobalNet()
         net.cuda()
 
         logging.info('######### Network created #########')
@@ -209,7 +206,7 @@ def main():
             net.cuda()
         else:
             optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      net.parameters()), lr=1e-4, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-10)
+                                   net.parameters()), lr=1e-4, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-10)
 
         best_valid_psnr = 0.0
 
@@ -228,77 +225,38 @@ def main():
             # train loss
             examples = 0.0
             running_loss = 0.0
+            
+            batch_pbar = tqdm(enumerate(training_data_loader, 0), total=len(training_data_loader))
 
-            for batch_num, data in tqdm(enumerate(training_data_loader, 0), total=len(training_data_loader)):
-
-                input_img_batch, gt_img_batch, category = Variable(data['input_img'],
-                                                                       requires_grad=False).cuda(), Variable(data['output_img'],
-                                                                                                             requires_grad=False).cuda(), data[
-                    'name']
-
-                start_time = time.time()
-                net_img_batch, gradient_regulariser = net(
-                    input_img_batch)
-                net_img_batch = torch.clamp(
-                    net_img_batch, 0.0, 1.0)
-
-                elapsed_time = time.time() - start_time
-
-                loss = criterion(net_img_batch,
-                                 gt_img_batch, gradient_regulariser)
-
-                optimizer.zero_grad()
+            for batch_num, data in batch_pbar:
+                input_img_batch, gt_img_batch = data['input_img'].cuda(non_blocking=True), \
+                                                data['output_img'].cuda(non_blocking=True)
+                
+                net_img_batch, gradient_regulariser = net(input_img_batch)
+                del input_img_batch
+                net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
+                
+                loss = criterion(net_img_batch, gt_img_batch, gradient_regulariser)
+                del net_img_batch, gt_img_batch, gradient_regulariser
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
 
-                running_loss += loss.data.item()
+                loss_scalar = loss.data.item()
+                running_loss += loss_scalar
                 examples += batch_size
                 total_examples+=batch_size
+                
+                writer.add_scalar('Loss/train', loss_scalar, total_examples)
+                batch_pbar.set_description('Train Loss: {}'.format(loss_scalar))
+                del loss
 
-                writer.add_scalar('Loss/train', loss.data.item(), total_examples)
 
             logging.info('[%d] train loss: %.15f' %
                          (epoch + 1, running_loss / examples))
             writer.add_scalar('Loss/train_smooth', running_loss / examples, epoch + 1)
 
             # Valid loss
-            '''
-            examples = 0.0
-            running_loss = 0.0
-
-            for batch_num, data in enumerate(validation_data_loader, 0):
-
-                net.eval()
-
-                input_img_batch, gt_img_batch, category = Variable(
-                    data['input_img'],
-                    requires_grad=True).cuda(), Variable(data['output_img'],
-                                                         requires_grad=False).cuda(), \
-                    data[
-                    'name']
-
-                net_img_batch, gradient_regulariser = net(
-                    input_img_batch)
-                net_img_batch = torch.clamp(
-                    net_img_batch, 0.0, 1.0)
-
-                optimizer.zero_grad()
-
-                loss = criterion(net_img_batch,
-                                 gt_img_batch, gradient_regulariser)
-
-                running_loss += loss.data.item()
-                examples += batch_size
-                total_examples+=batch_size
-                writer.add_scalar('Loss/train', loss.data.item(), total_examples)
-
-
-            logging.info('[%d] valid loss: %.15f' %
-                         (epoch + 1, running_loss / examples))
-            writer.add_scalar('Loss/valid_smooth', running_loss / examples, epoch + 1)
-
-            net.train()
-            '''
             if (epoch + 1) % valid_every == 0:
 
                 logging.info("Evaluating model on validation dataset")
