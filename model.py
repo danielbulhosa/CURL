@@ -207,26 +207,31 @@ class CURLLoss(nn.Module):
         :rtype: float
 
         """
+        rgb_loss_value = F.l1_loss(predicted_img_batch, target_img_batch)
+        cosine_rgb_loss_value = (1.0 - torch.nn.functional.cosine_similarity(predicted_img_batch, 
+                                                                             target_img_batch, dim=1).mean(dim=(1, 2))).mean()
+        
         target_img_batch_lab = self.batch_lab_convert(target_img_batch)
         predicted_img_batch_lab = self.batch_lab_convert(predicted_img_batch)
+        l1_loss_value = F.l1_loss(predicted_img_batch_lab, target_img_batch_lab)
             
         target_img_batch_L_ssim = self.batch_L_ssim_convert(target_img_batch_lab)
+        del target_img_batch_lab
         predicted_img_batch_L_ssim = self.batch_L_ssim_convert(predicted_img_batch_lab)
+        del predicted_img_batch_lab
+        ssim_loss_value = (1.0 - self.compute_msssim(predicted_img_batch_L_ssim , target_img_batch_L_ssim)).mean()
+        del target_img_batch_L_ssim, predicted_img_batch_L_ssim
         
         target_img_batch_hsv = self.batch_hsv_convert(target_img_batch)
         predicted_img_batch_hsv = self.batch_hsv_convert(predicted_img_batch)
-                                              
-        # Calculate losses: batch
-        l1_loss_value = F.l1_loss(predicted_img_batch_lab, target_img_batch_lab)
-        rgb_loss_value = F.l1_loss(predicted_img_batch, target_img_batch)
-        hsv_loss_value = F.l1_loss(predicted_img_batch_hsv, target_img_batch_hsv)                                              
-        cosine_rgb_loss_value = (1.0 - torch.nn.functional.cosine_similarity(predicted_img_batch, 
-                                                                            target_img_batch, dim=1).mean(dim=(1, 2))).mean()
-        ssim_loss_value = (1.0 - self.compute_msssim(predicted_img_batch_L_ssim , target_img_batch_L_ssim)).mean()
-        grad_reg = gradient_regulariser.mean()                
+        hsv_loss_value = F.l1_loss(predicted_img_batch_hsv, target_img_batch_hsv) # FIXME - this is NaN always...
+        del target_img_batch_hsv, predicted_img_batch_hsv
+                                 
+        grad_reg = gradient_regulariser.mean()   
 
-        curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value +
-                     hsv_loss_value + 10*ssim_loss_value + 1e-6*grad_reg)/6
+        curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value
+                     + hsv_loss_value + 10*ssim_loss_value + 1e-6*grad_reg)/6
+        del rgb_loss_value, cosine_rgb_loss_value, hsv_loss_value, l1_loss_value, ssim_loss_value, grad_reg
 
         return curl_loss
 
@@ -320,8 +325,9 @@ class CURLLayer(nn.Module):
         img_residual = self.convert(img_hsv, 'hsv', 'rgb')
         img = torch.clamp(img + img_residual, 0.0, 1.0)
         
-        gradient_regulariser = gradient_regulariser_rgb + \
-            gradient_regulariser_lab+gradient_regulariser_hsv
+        gradient_regulariser = (gradient_regulariser_rgb +
+                                gradient_regulariser_lab+\
+                                gradient_regulariser_hsv)
 
         return img, gradient_regulariser
 
@@ -349,7 +355,7 @@ class ConvStack(nn.Module):
         self.layer6 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.layer7 = ConvBlock(conv_in, conv_out)
         self.layer8 = nn.AdaptiveAvgPool2d(1)
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(dropout)
         self.fc = torch.nn.Linear(conv_in, curve_out)
         
     def forward(self, feat_maps):
@@ -404,3 +410,4 @@ class CURLGlobalNet(nn.Module):
 
     def forward(self, img):
         return self.curllayer(self.final_conv(self.refpad(img)))
+    
