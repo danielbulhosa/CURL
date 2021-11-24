@@ -210,10 +210,9 @@ class ImageProcessing(object):
         for i in range(0, num_images):
             imageA = image_batchA[i, 0:3, :, :]
             imageB = image_batchB[i, 0:3, :, :]
-            imageB = np.maximum(0, np.minimum(imageB, max_intensity))
-            psnr_val += 10 * \
-                np.log10(max_intensity ** 2 /
-                         ImageProcessing.compute_mse(imageA, imageB))
+            imageB = torch.maximum(torch.tensor(0), torch.minimum(imageB, max_intensity))
+            psnr_val += 10 * torch.log10(max_intensity ** 2 /
+                             ImageProcessing.compute_mse(imageA, imageB))
 
         return psnr_val / num_images
 
@@ -233,9 +232,9 @@ class ImageProcessing(object):
 
         for i in range(0, num_images):
             imageA = ImageProcessing.swapimdims_3HW_HW3(
-                image_batchA[i, 0:3, :, :])
+                image_batchA[i, 0:3, :, :]).cpu().numpy()
             imageB = ImageProcessing.swapimdims_3HW_HW3(
-                image_batchB[i, 0:3, :, :])
+                image_batchB[i, 0:3, :, :]).cpu().numpy()
             ssim_val += ssim(imageA, imageB, data_range=imageA.max() - imageA.min(), multichannel=True,
                              gaussian_weights=True, win_size=11)
 
