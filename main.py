@@ -249,7 +249,6 @@ def main():
                 
                 writer.add_scalar('Loss/train', loss_scalar, total_examples)
                 batch_pbar.set_description('Train Loss: {}'.format(loss_scalar))
-                del loss
 
 
             logging.info('[%d] train loss: %.15f' %
@@ -270,20 +269,18 @@ def main():
                 if valid_psnr > best_valid_psnr:
 
                     logging.info(
-                        "Validation PSNR has increased. Saving the more accurate model to file: " + 'curl_validpsnr_{}_validloss_{}_testpsnr_{}_testloss_{}_epoch_{}_model.pt'.format(valid_psnr,
-                                                                                                                                                                                         valid_loss.tolist()[0], test_psnr, test_loss.tolist()[
-                                                                                                                                                                                             0],
-                                                                                                                                                                                         epoch))
+                        "Validation PSNR has increased. Saving the more accurate model to file: " + 
+                        'curl_validpsnr_{}_validloss_{}_testpsnr_{}_testloss_{}_epoch_{}_model.pt'.format(valid_psnr, valid_loss, test_psnr, 
+                                                                                                          test_loss, epoch))
 
                     best_valid_psnr = valid_psnr
                     snapshot_prefix = os.path.join(
                         log_dirpath, 'curl')
                     snapshot_path = snapshot_prefix + '_validpsnr_{}_validloss_{}_testpsnr_{}_testloss_{}_epoch_{}_model.pt'.format(valid_psnr,
-                                                                                                                                    valid_loss.tolist()[
-                                                                                                                                        0],
-                                                                                                                                    test_psnr, test_loss.tolist()[
-                                                                                                                                        0],
-                                                                                                                                    epoch +1)
+                                                                                                                                    valid_loss,
+                                                                                                                                    test_psnr, 
+                                                                                                                                    test_loss,
+                                                                                                                                    epoch + 1)
                     '''
                     torch.save(net, snapshot_path)
                     '''
