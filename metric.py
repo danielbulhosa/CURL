@@ -73,6 +73,8 @@ class Evaluator():
         with torch.no_grad():
 
             batch_pbar = tqdm(enumerate(self.data_loader, 0), total=len(self.data_loader))
+            examples = 0.0
+            running_loss = 0.0
             
             for batch_num, data in batch_pbar:
 
@@ -84,6 +86,9 @@ class Evaluator():
                 net_output_img_batch ,_= net(input_img_batch)
                 loss = self.criterion(net_output_img_batch, output_img_batch, torch.zeros(net_output_img_batch.shape[0]))
                 loss_scalar = loss.item()
+                running_loss += loss_scalar
+                examples += input_img_batch.shape[0]
+                
                 net_output_img_batch = torch.clamp(net_output_img_batch, 0, 1)
                 
                 psnr_avg = ImageProcessing.compute_psnr(output_img_batch, net_output_img_batch, torch.tensor(1.0)).item()
@@ -92,6 +97,6 @@ class Evaluator():
                 batch_pbar.set_description('Train Loss: {}'.format(loss_scalar))
 
         logging.info('loss_%s: %.5f psnr_%s: %.3f ssim_%s: %.3f' % (
-            self.split_name, loss_scalar, self.split_name, psnr_avg, self.split_name, ssim_avg))
+            self.split_name, running_loss / examples, self.split_name, psnr_avg, self.split_name, ssim_avg))
 
-        return loss_scalar, psnr_avg, ssim_avg
+        return running_loss / examples, psnr_avg, ssim_avg
