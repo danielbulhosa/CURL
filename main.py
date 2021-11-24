@@ -210,15 +210,8 @@ def main():
 
         best_valid_psnr = 0.0
 
-        alpha = 0.0
         optimizer.zero_grad()
         net.train()
-
-        running_loss = 0.0
-        examples = 0
-        psnr_avg = 0.0
-        ssim_avg = 0.0
-        total_examples = 0
 
         for epoch in range(start_epoch,num_epoch):
 
@@ -245,9 +238,8 @@ def main():
                 loss_scalar = loss.data.item()
                 running_loss += loss_scalar
                 examples += batch_size
-                total_examples+=batch_size
                 
-                writer.add_scalar('Loss/train', loss_scalar, total_examples)
+                writer.add_scalar('Loss/train', loss_scalar, examples)
                 batch_pbar.set_description('Train Loss: {}'.format(loss_scalar))
 
 
