@@ -320,22 +320,27 @@ class ImageProcessing(object):
         # Each channel is shape (b, x, y) tensor
         r, g, b = img[:, 0, :, :], img[:, 1, :, :], img[:, 2, :, :]
         
-        # New channel 0, hue
-        img[:, 0, :, :] = (((g-b)/df)*r.eq(mx).float() + (2.0+(b-r)/df)
-                           * g.eq(mx).float() + (4.0+(r-g)/df)*b.eq(mx).float())
+        # New channel 0, hue (see: https://www.rapidtables.com/convert/color/rgb-to-hsv.html)
+        df_inv = ImageProcessing.non_nan_inv(df)        
+        img[:, 0, :, :] = torch.where(df == zero, 
+                                      zero,
+                                      ((g-b)*df_inv)*r.eq(mx).float() + (2.0+(b-r)*df_inv)
+                                      * g.eq(mx).float() + (4.0+(r-g)*df_inv)*b.eq(mx).float())
         img[:, 0, :, :] = img[:, 0, :, :]*60.0
 
+        # Convert hue to range 0 to 360
         img[:, 0, :, :] = img[:, 0, :, :].lt(zero).float(
         )*(img[:, 0, :, :]+360) + img[:, 0, :, :].ge(zero).float()*(img[:, 0, :, :])
 
         img[:, 0, :, :] = img[:, 0, :, :]/360
 
-
         # Set saturation and value, remaining channels
-        img[:, 1, :, :] = mx.ne(zero).float()*(df/mx) + \
-            mx.eq(zero).float()*(zero)
+        mx_inv = ImageProcessing.non_nan_inv(mx)
+        img[:, 1, :, :] = torch.where(mx == zero,
+                                      zero,
+                                      mx.ne(zero).float()*(df*mx_inv) + mx.eq(zero).float()*(zero))
         img[:, 2, :, :] = mx
-        
+
         img = torch.clamp(img, 10**(-9), 1.0)
 
         return img
@@ -519,3 +524,10 @@ class ImageProcessing(object):
         img = img.contiguous()
 
         return img, slope_sqr_diff
+
+    @staticmethod
+    def non_nan_inv(tensor):
+        tensor_inv = torch.zeros(tensor.shape, device=torch.device('cuda'), dtype=torch.float)
+        tensor_inv[tensor != 0] = 1/(tensor[tensor != 0])
+        
+        return tensor_inv
