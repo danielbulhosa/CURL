@@ -78,8 +78,8 @@ class Evaluator():
             
             for batch_num, data in batch_pbar:
 
-                input_img_batch, output_img_batch, name = Variable(data['input_img'], requires_grad=False).cuda(), \
-                                                          Variable(data['output_img'], requires_grad=False).cuda(), \
+                input_img_batch, output_img_batch, name = Variable(data['input_img'], requires_grad=False).cuda(non_blocking=True), \
+                                                          Variable(data['output_img'], requires_grad=False).cuda(non_blocking=True), \
                                                           data['name']
                         
                 input_img_batch = torch.clamp(input_img_batch, 0, 1)
