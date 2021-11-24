@@ -404,10 +404,14 @@ class CURLGlobalNet(nn.Module):
 
     def __init__(self):
         super(CURLGlobalNet, self).__init__()
-        self.final_conv = nn.Conv2d(3, 64, 3, 1, 0, 1)
+        self.final_conv = nn.Conv2d(3, 61, 3, 1, 0, 1)
         self.refpad = nn.ReflectionPad2d(1)
         self.curllayer = CURLLayer()
 
     def forward(self, img):
-        return self.curllayer(self.final_conv(self.refpad(img)))
+        img_pad = self.refpad(img)
+        feats = self.final_conv(img_pad)
+        full_input = torch.cat((img, feats), dim=1)
+        
+        return self.curllayer(full_input)
     
