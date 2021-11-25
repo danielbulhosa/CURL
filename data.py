@@ -45,6 +45,7 @@ def get_data_dict(data_dirpath):
     try: 
         input_dir = [directory for directory in data_dirs if 'input' in directory][0]
         output_dir = [directory for directory in data_dirs if 'output' in directory][0]
+        logging.info("Using {} as input directory and {} as output directory.".format(input_dir, output_dir))
     except IndexError:
         raise OSError("{} must contain a directories containing the words 'input', 'output' respectively".format(data_dirpath))
 
