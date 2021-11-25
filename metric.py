@@ -94,7 +94,7 @@ class Evaluator():
                 psnr_avg = ImageProcessing.compute_psnr(output_img_batch, net_output_img_batch, torch.tensor(1.0)).item()
                 ssim_avg = ImageProcessing.compute_ssim(output_img_batch,net_output_img_batch)
                 
-                batch_pbar.set_description('Train Loss: {}'.format(loss_scalar))
+                batch_pbar.set_description('Epoch {}. Loss: {}'.format(epoch, loss_scalar))
 
         logging.info('loss_%s: %.5f psnr_%s: %.3f ssim_%s: %.3f' % (
             self.split_name, running_loss / examples, self.split_name, psnr_avg, self.split_name, ssim_avg))
