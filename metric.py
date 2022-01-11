@@ -39,32 +39,30 @@ class Evaluator():
         self.split_name = split_name
         self.log_dirpath = log_dirpath
         
-    def save_images(output_img_batch, net_output_img_batch, psnrs, ssims, name, epoch):        
-        for i in range(0, input_img_batch.shape[0]):
+    def save_images(self, net_output_img_batch, names, epoch):  
+        numpy_batch = net_output_img_batch.cpu().numpy()
+        
+        split_dirpath = self.log_dirpath + "/" + self.split_name.lower() + "/"
+        epoch_dirpath = split_dirpath + "/" + str(epoch + 1) + "/"
+        
+        for data_dir in [split_dirpath, epoch_dirpath]:
+            if not os.path.isdir(data_dir):
+                os.mkdir(data_dir)
 
-            output_img_example = (output_img_batch[i] * 255).astype('uint8')
-            net_output_img_example = (net_output_img_batch[i] * 255).astype('uint8')
-            psnr_example = psnrs[i]
-            ssim_example = ssims[i]
-
-            save_path = out_dirpath + "/" + name[0].split(".")[0] + "_" + self.split_name.upper() + "_" + str(epoch + 1) + "_PSNR_" \
-                        + str("{0:.3f}".format(psnr_example)) + "_SSIM_" + str("{0:.3f}".format(ssim_example)) + ".jpg"
-            
+        for i in range(0, numpy_batch.shape[0]):
+            net_output_img_example = (numpy_batch[i] * 255).astype('uint8')
+            save_path = epoch_dirpath + names[i]
             plt.imsave(save_path, ImageProcessing.swapimdims_3HW_HW3(net_output_img_example))
 
-    def evaluate(self, net, epoch=0):
+    def evaluate(self, net, epoch=0, save_images=False):
         """Evaluates a network on a specified split of a dataset e.g. test, validation
         :param net: PyTorch neural network data structure
         :param data_loader: an instance of the DataLoader class for the dataset of interest
         :param split_name: name of the split e.g. "test", "validation"
         :param log_dirpath: logging directory
-        :returns: average loss, average PSNR
-        :rtype: float, float
+        :returns: average loss, average PSNR, average SSIM
+        :rtype: float, float, float
         """
-
-        out_dirpath = self.log_dirpath + "/" + self.split_name.lower()
-        if not os.path.isdir(out_dirpath):
-            os.mkdir(out_dirpath)
 
         # switch model to evaluation mode
         net.eval()
@@ -75,28 +73,33 @@ class Evaluator():
             batch_pbar = tqdm(enumerate(self.data_loader, 0), total=len(self.data_loader))
             examples = 0.0
             running_loss = 0.0
+            batches = 0.0
             
             for batch_num, data in batch_pbar:
 
-                input_img_batch, output_img_batch, name = Variable(data['input_img'], requires_grad=False).cuda(non_blocking=True), \
+                input_img_batch, output_img_batch, names = Variable(data['input_img'], requires_grad=False).cuda(non_blocking=True), \
                                                           Variable(data['output_img'], requires_grad=False).cuda(non_blocking=True), \
                                                           data['name']
                         
                 input_img_batch = torch.clamp(input_img_batch, 0, 1)
-                net_output_img_batch ,_= net(input_img_batch)
+                net_output_img_batch, _ = net(input_img_batch)
                 loss = self.criterion(net_output_img_batch, output_img_batch, torch.zeros(net_output_img_batch.shape[0]))
                 loss_scalar = loss.item()
                 running_loss += loss_scalar
                 examples += input_img_batch.shape[0]
+                batches += 1
                 
                 net_output_img_batch = torch.clamp(net_output_img_batch, 0, 1)
                 
                 psnr_avg = ImageProcessing.compute_psnr(output_img_batch, net_output_img_batch, torch.tensor(1.0)).item()
-                ssim_avg = ImageProcessing.compute_ssim(output_img_batch,net_output_img_batch)
+                ssim_avg = ImageProcessing.compute_ssim(output_img_batch, net_output_img_batch)
+                
+                if save_images:
+                    self.save_images(net_output_img_batch, names, epoch)
                 
                 batch_pbar.set_description('Epoch {}. Loss: {}'.format(epoch, loss_scalar))
 
         logging.info('loss_%s: %.5f psnr_%s: %.3f ssim_%s: %.3f' % (
-            self.split_name, running_loss / examples, self.split_name, psnr_avg, self.split_name, ssim_avg))
+            self.split_name, running_loss / batches, self.split_name, psnr_avg, self.split_name, ssim_avg))
 
-        return running_loss / examples, psnr_avg, ssim_avg
+        return running_loss / batches, psnr_avg, ssim_avg
