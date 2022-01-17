@@ -18,7 +18,7 @@ import os
 import torch
 import logging
 from torch.autograd import Variable
-from util import ImageProcessing
+import image_processing
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
@@ -52,7 +52,7 @@ class Evaluator():
         for i in range(0, numpy_batch.shape[0]):
             net_output_img_example = (numpy_batch[i] * 255).astype('uint8')
             save_path = epoch_dirpath + names[i]
-            plt.imsave(save_path, ImageProcessing.swapimdims_3HW_HW3(net_output_img_example))
+            plt.imsave(save_path, image_processing.swapimdims_3HW_HW3(net_output_img_example))
 
     def evaluate(self, net, epoch=0, save_images=False):
         """Evaluates a network on a specified split of a dataset e.g. test, validation
@@ -91,8 +91,8 @@ class Evaluator():
                 
                 net_output_img_batch = torch.clamp(net_output_img_batch, 0, 1)
                 
-                psnr_avg = ImageProcessing.compute_psnr(output_img_batch, net_output_img_batch, torch.tensor(1.0)).item()
-                ssim_avg = ImageProcessing.compute_ssim(output_img_batch, net_output_img_batch)
+                psnr_avg = image_processing.compute_psnr(output_img_batch, net_output_img_batch, torch.tensor(1.0)).item()
+                ssim_avg = image_processing.compute_ssim(output_img_batch, net_output_img_batch)
                 
                 if save_images:
                     self.save_images(net_output_img_batch, names, epoch)

@@ -15,7 +15,7 @@ import math
 import numpy as np
 from torch.autograd import Variable
 import torch
-
+from math import exp
 import matplotlib
 import sys
 matplotlib.use('agg')
@@ -67,8 +67,8 @@ def rgb_to_lab(img, is_training=True):
     img = (img / 12.92) * img.le(0.04045).float() + (((torch.clamp(img,
                                                                    min=0.0001) + 0.055) / 1.055) ** 2.4) * img.gt(0.04045).float()
 
-    img = torch.einsum('bcxy,ck->bkxy', img, ImageProcessing.rgb_to_xyz)
-    img = torch.mul(img, 1/ImageProcessing.xyz_to_rgb_mult)
+    img = torch.einsum('bcxy,ck->bkxy', img, rgb_to_xyz)
+    img = torch.mul(img, 1/xyz_to_rgb_mult)
 
     epsilon = 6/29
 
@@ -76,7 +76,7 @@ def rgb_to_lab(img, is_training=True):
         (torch.clamp(img, min=0.0001) **
          (1.0/3.0) * img.gt(epsilon**3).float())
 
-    img = torch.einsum('bcxy,ck->bkxy', img, ImageProcessing.fxfyfz_to_lab) - ImageProcessing.lab_to_fxfyfz_offset
+    img = torch.einsum('bcxy,ck->bkxy', img, fxfyfz_to_lab) - lab_to_fxfyfz_offset
 
     '''
     L_chan: black and white with input range [0, 100]
@@ -105,8 +105,8 @@ def lab_to_rgb(img, is_training=True):
     img[:, 2, :, :] = ((img[:, 2, :, :] * 2)-1)*110
 
     img = torch.einsum('bcxy,ck->bkxy', 
-                       img + ImageProcessing.lab_to_fxfyfz_offset, 
-                       ImageProcessing.lab_to_fxfyfz)
+                       img + lab_to_fxfyfz_offset, 
+                       lab_to_fxfyfz)
 
     epsilon = 6.0/29.0
 
@@ -114,9 +114,9 @@ def lab_to_rgb(img, is_training=True):
            ((torch.clamp(img, min=0.0001)**3.0) * img.gt(epsilon).float()))
 
     # denormalize for D65 white point
-    img = torch.mul(img, ImageProcessing.xyz_to_rgb_mult)
+    img = torch.mul(img, xyz_to_rgb_mult)
 
-    img = torch.einsum('bcxy,ck->bkxy', img, ImageProcessing.xyz_to_rgb)
+    img = torch.einsum('bcxy,ck->bkxy', img, xyz_to_rgb)
     img = (img * 12.92 * img.le(0.0031308).float()) + ((torch.clamp(img,
                                                                     min=0.0001) ** (1/2.4) * 1.055) - 0.055) * img.gt(0.0031308).float()
 
@@ -163,7 +163,7 @@ def load_image(img_filepath, normaliser):
     :rtype: multi-dimensional numpy array
 
     """
-    img = ImageProcessing.normalise_image(np.array(Image.open(img_filepath)), normaliser)  # NB: imread normalises to 0-1
+    img = normalise_image(np.array(Image.open(img_filepath)), normaliser)  # NB: imread normalises to 0-1
     return img
 
 
@@ -207,7 +207,7 @@ def compute_psnr(image_batchA, image_batchB, max_intensity):
                                  torch.clamp(image_batchB, 0.0, 1.0)
     # Calculate PSNR per image
     psnr_val = 10 * torch.log10(max_intensity ** 2 /
-                                ImageProcessing.compute_mse(image_batchA, image_batchB))
+                                compute_mse(image_batchA, image_batchB))
 
     # Take average over batch dimension
     return psnr_val.mean()
@@ -223,7 +223,7 @@ def create_window(window_size, num_channel):
     :rtype: Tensor
 
     """
-    _1D_window = ImageProcessing.gaussian(window_size, 1.5).unsqueeze(1)
+    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
     _2D_window = _1D_window.mm(
         _1D_window.t()).float().unsqueeze(0).unsqueeze(0)
     window = Variable(_2D_window.expand(
@@ -248,12 +248,12 @@ def gaussian(window_size, sigma):
 # Default values for ssim methods
 window_size = 11
 channels = 3
-gaussian_window = ImageProcessing.create_window(window_size, channels)
+gaussian_window = create_window(window_size, channels)
 
 
-def compute_ssim(img1, img2, window=ImageProcessing.gaussian_window, 
-                 ssim_window_size=ImageProcessing.window_size, 
-                 num_channel=ImageProcessing.channels):
+def compute_ssim(img1, img2, window=gaussian_window, 
+                 ssim_window_size=window_size, 
+                 num_channel=channels):
     """Computes the structural similarity index between two images. This function is differentiable.
     Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
     Note ssim does not assume a color space (https://arxiv.org/pdf/2006.13846.pdf)
@@ -297,9 +297,9 @@ def compute_ssim(img1, img2, window=ImageProcessing.gaussian_window,
     return ssim_map.mean(dim=(1, 2, 3)), cs
 
 
-def compute_msssim(img1, img2, window=ImageProcessing.gaussian_window, 
-                   ssim_window_size=ImageProcessing.window_size, 
-                   num_channel=ImageProcessing.channels):
+def compute_msssim(img1, img2, window=gaussian_window, 
+                   ssim_window_size=window_size, 
+                   num_channel=channels):
     """Computes the multi scale structural similarity index between two images. This function is differentiable.
     Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
 
@@ -325,7 +325,7 @@ def compute_msssim(img1, img2, window=ImageProcessing.gaussian_window,
     ssims = []
     mcs = []
     for _ in range(levels):
-        ssim, cs = ImageProcessing.compute_ssim(img1, img2, window, ssim_window_size, num_channel)
+        ssim, cs = compute_ssim(img1, img2, window, ssim_window_size, num_channel)
 
         # Relu normalize (not compliant with original definition)
         ssims.append(ssim)
@@ -428,7 +428,7 @@ def rgb_to_hsv(img):
     r, g, b = img[:, 0, :, :], img[:, 1, :, :], img[:, 2, :, :]
 
     # New channel 0, hue (see: https://www.rapidtables.com/convert/color/rgb-to-hsv.html)
-    df_inv = ImageProcessing.non_nan_inv(df)        
+    df_inv = non_nan_inv(df)        
     img[:, 0, :, :] = torch.where(df == zero, 
                                   zero,
                                   ((g-b)*df_inv)*r.eq(mx).float() + (2.0+(b-r)*df_inv)
@@ -442,7 +442,7 @@ def rgb_to_hsv(img):
     img[:, 0, :, :] = img[:, 0, :, :]/360
 
     # Set saturation and value, remaining channels
-    mx_inv = ImageProcessing.non_nan_inv(mx)
+    mx_inv = non_nan_inv(mx)
     img[:, 1, :, :] = torch.where(mx == zero,
                                   zero,
                                   mx.ne(zero).float()*(df*mx_inv) + mx.eq(zero).float()*(zero))
@@ -512,25 +512,25 @@ def adjust_hsv(img, S):
     '''
     Adjust Hue channel based on Hue using the predicted curve
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img, S1, slope_sqr_diff, channel_in=0, channel_out=0)
 
     '''
     Adjust Saturation channel based on Hue using the predicted curve
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img_copy, S2, slope_sqr_diff, channel_in=0, channel_out=1)
 
     '''
     Adjust Saturation channel based on Saturation using the predicted curve
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img_copy, S3, slope_sqr_diff, channel_in=1, channel_out=1)
 
     '''
     Adjust Value channel based on Value using the predicted curve
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img_copy, S4, slope_sqr_diff, channel_in=2, channel_out=2)
 
     img = img_copy.clone()
@@ -564,19 +564,19 @@ def adjust_rgb(img, R):
     '''
     slope_sqr_diff = Variable(torch.zeros(batch_dim, device=torch.device('cuda'))*0.0)
 
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img, R1, slope_sqr_diff, channel_in=0, channel_out=0)
 
     '''
     Apply the curve to the G channel 
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img_copy, R2, slope_sqr_diff, channel_in=1, channel_out=1)
 
     '''
     Apply the curve to the B channel 
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img_copy, R3, slope_sqr_diff, channel_in=2, channel_out=2)
 
     img = img_copy.clone()
@@ -611,19 +611,19 @@ def adjust_lab(img, L):
     '''
     Apply the curve to the L channel 
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img, L1, slope_sqr_diff, channel_in=0, channel_out=0)
 
     '''
     Now do the same for the a channel
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img_copy, L2, slope_sqr_diff, channel_in=1, channel_out=1)
 
     '''
     Now do the same for the b channel
     '''
-    img_copy, slope_sqr_diff = ImageProcessing.apply_curve(
+    img_copy, slope_sqr_diff = apply_curve(
         img_copy, L3, slope_sqr_diff, channel_in=2, channel_out=2)
 
     img = img_copy.clone()
