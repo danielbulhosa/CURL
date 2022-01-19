@@ -82,8 +82,8 @@ class Evaluator():
                                                           data['name']
                         
                 input_img_batch = torch.clamp(input_img_batch, 0, 1)
-                net_output_img_batch, _ = net(input_img_batch)
-                loss = self.criterion(net_output_img_batch, output_img_batch, torch.zeros(net_output_img_batch.shape[0]))
+                net_output_img_batch = net(input_img_batch)
+                loss = self.criterion(net_output_img_batch, output_img_batch)
                 loss_scalar = loss.item()
                 running_loss += loss_scalar
                 examples += input_img_batch.shape[0]
