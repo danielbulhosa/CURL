@@ -101,9 +101,11 @@ def lab_to_rgb(img, is_training=True):
     """                
     img = img.contiguous()
 
-    img[:, 0, :, :] = img[:, 0, :, :] * 100
-    img[:, 1, :, :] = ((img[:, 1, :, :] * 2)-1)*110
-    img[:, 2, :, :] = ((img[:, 2, :, :] * 2)-1)*110
+    channel0 = torch.unsqueeze(img[:, 0, :, :] * 100, dim=1)
+    channel1 = torch.unsqueeze(((img[:, 1, :, :] * 2)-1)*110, dim=1)
+    channel2 = torch.unsqueeze(((img[:, 2, :, :] * 2)-1)*110, dim=1)
+    
+    img = torch.concat([channel0, channel1, channel2], dim=1)
 
     img = torch.einsum('bcxy,ck->bkxy', 
                        img + lab_to_fxfyfz_offset, 
@@ -393,7 +395,6 @@ def hsv_to_rgb(img):
 
     img = torch.stack((r, g, b), 1)
     del r, g, b
-    #img[(img != img).detach()] = 0 # This causes memory error
 
     img = img.contiguous()
     img = torch.clamp(img, 0.0, 1.0)
