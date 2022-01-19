@@ -92,14 +92,14 @@ class Evaluator():
                 net_output_img_batch = torch.clamp(net_output_img_batch, 0, 1)
                 
                 psnr_avg = image_processing.compute_psnr(output_img_batch, net_output_img_batch, torch.tensor(1.0)).item()
-                ssim_avg = image_processing.compute_ssim(output_img_batch, net_output_img_batch)
+                msssim_avg = image_processing.compute_msssim(output_img_batch, net_output_img_batch).mean().item()
                 
                 if save_images:
                     self.save_images(net_output_img_batch, names, epoch)
                 
                 batch_pbar.set_description('Epoch {}. Loss: {}'.format(epoch, loss_scalar))
 
-        logging.info('loss_%s: %.5f psnr_%s: %.3f ssim_%s: %.3f' % (
-            self.split_name, running_loss / batches, self.split_name, psnr_avg, self.split_name, ssim_avg))
+        logging.info('loss_%s: %.5f psnr_%s: %.3f msssim_%s: %.3f' % (
+            self.split_name, running_loss / batches, self.split_name, psnr_avg, self.split_name, msssim_avg))
 
-        return running_loss / batches, psnr_avg, ssim_avg
+        return running_loss / batches, psnr_avg, msssim_avg
