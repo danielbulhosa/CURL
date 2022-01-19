@@ -12,6 +12,7 @@ Authors: Sean Moran (sean.j.moran@gmail.com),
 '''
 from PIL import Image
 import math
+import torch.nn.functional as F
 import numpy as np
 from torch.autograd import Variable
 import torch
@@ -188,12 +189,12 @@ def compute_mse(original_batch, result_batch):
     :rtype: float
 
     """
-    mask = torch.logical_not(torch.logical_and((0 == original).all(dim=1),
-                                       (0 == result).all(dim=1)))
-    return ((original - result) ** 2).sum(dims=(1,2,3))/mask.sum(dims=(1,2))
+    mask = torch.logical_not(torch.logical_and((0 == original_batch).all(dim=1),
+                                       (0 == result_batch).all(dim=1)))
+    return ((original_batch - result_batch) ** 2).sum(dim=(1,2,3))/mask.sum(dim=(1,2))
 
 
-def compute_psnr(image_batchA, image_batchB, max_intensity):
+def compute_psnr(image_batchA, image_batchB, max_intensity=1.0):
     """Computes the PSNR for a batch of input and output images
 
     :param image_batchA: numpy nd-array representing the image batch A of shape Bx3xWxH
