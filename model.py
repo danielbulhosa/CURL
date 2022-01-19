@@ -18,18 +18,21 @@ import torch
 import torch.nn as nn
 from collections import defaultdict
 import rgb_ted
-from util import ImageProcessing
+import image_processing as improc
 from torch.autograd import Variable
 import math
-from math import exp
 import torch.nn.functional as F
+from torchvision import models
+import operator as op
+import timm
+from functools import reduce
 
 np.set_printoptions(threshold=sys.maxsize)
 
 
 class CURLLoss(nn.Module):
-
-    def __init__(self, ssim_window_size=5, alpha=0.5, num_channel=1):
+    
+    def __init__(self, ssim_window_size=5, num_channel=1):
         """Initialisation of the DeepLPF loss function
 
         :param ssim_window_size: size of averaging window for SSIM
@@ -39,140 +42,23 @@ class CURLLoss(nn.Module):
 
         """
         super(CURLLoss, self).__init__()
-        self.alpha = alpha
         self.ssim_window_size = ssim_window_size
         self.num_channel = num_channel
-        self.window = CURLLoss.create_window(self.ssim_window_size, self.num_channel)
+        self.window = improc.create_window(self.ssim_window_size, self.num_channel)
 
-
-    @staticmethod
-    def create_window(window_size, num_channel):
-        """Window creation function for SSIM metric. Gaussian weights are applied to the window.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-
-        :param window_size: size of the window to compute statistics
-        :param num_channel: number of channels
-        :returns: Tensor of shape Cx1xWindow_sizexWindow_size
-        :rtype: Tensor
-
-        """
-        _1D_window = CURLLoss.gaussian(window_size, 1.5).unsqueeze(1)
-        _2D_window = _1D_window.mm(
-            _1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-        window = Variable(_2D_window.expand(
-            num_channel, 1, window_size, window_size).contiguous())
-        return window
-
-    @staticmethod
-    def gaussian(window_size, sigma):
-        """
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-        :param window_size: size of the SSIM sampling window e.g. 11
-        :param sigma: Gaussian variance
-        :returns: 1xWindow_size Tensor of Gaussian weights
-        :rtype: Tensor
-
-        """
-        gauss = torch.Tensor(
-            [exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)]).cuda()
-        return gauss / gauss.sum()
 
     def compute_ssim(self, img1, img2):
-        """Computes the structural similarity index between two images. This function is differentiable.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-
-        :param img1: image Tensor BxCxHxW
-        :param img2: image Tensor BxCxHxW
-        :returns: mean SSIM
-        :rtype: float
-
-        """
-        window = self.window.type_as(img1)
-
-        mu1 = F.conv2d(
-            img1, window, padding=self.ssim_window_size // 2, groups=self.num_channel)
-        mu2 = F.conv2d(
-            img2, window, padding=self.ssim_window_size // 2, groups=self.num_channel)
-
-        mu1_sq = mu1.pow(2)
-        mu2_sq = mu2.pow(2)
-        mu1_mu2 = mu1 * mu2
-
-        sigma1_sq = F.conv2d(
-            img1 * img1, window, padding=self.ssim_window_size // 2, groups=self.num_channel) - mu1_sq
-        sigma2_sq = F.conv2d(
-            img2 * img2, window, padding=self.ssim_window_size // 2, groups=self.num_channel) - mu2_sq
-        sigma12 = F.conv2d(
-            img1 * img2, window, padding=self.ssim_window_size // 2, groups=self.num_channel) - mu1_mu2
-
-        C1 = 0.01 ** 2
-        C2 = 0.03 ** 2
-
-        ssim_map1 = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2))
-        ssim_map2 = ((mu1_sq.cuda() + mu2_sq.cuda() + C1) *
-                     (sigma1_sq.cuda() + sigma2_sq.cuda() + C2))
-        ssim_map = ssim_map1.cuda() / ssim_map2.cuda()
-
-        v1 = 2.0 * sigma12.cuda() + C2
-        v2 = sigma1_sq.cuda() + sigma2_sq.cuda() + C2
-        cs = torch.mean(v1 / v2, dim=(1, 2, 3))
-
-        return ssim_map.mean(dim=(1, 2, 3)), cs
+        return improc.compute_ssim(img1, img2, self.window, 
+                                            self.ssim_window_size, self.num_channel)
 
 
     def compute_msssim(self, img1, img2):
-        """Computes the multi scale structural similarity index between two images. This function is differentiable.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-
-        :param img1: image Tensor BxCxHxW
-        :param img2: image Tensor BxCxHxW
-        :returns: mean SSIM
-        :rtype: float
-
-        """
-        if img1.shape[2]!=img2.shape[2]:
-                img1=img1.transpose(2,3)
-
-        if img1.shape != img2.shape:
-            raise RuntimeError('Input images must have the same shape (%s vs. %s).',
-                       img1.shape, img2.shape)
-        if img1.ndim != 4:
-            raise RuntimeError('Input images must have four dimensions, not %d',
-                       img1.ndim)
-
-        device = img1.device
-        weights = torch.FloatTensor([0.0448, 0.2856, 0.3001, 0.2363, 0.1333]).to(device)
-        levels = weights.size()[0]
-        ssims = []
-        mcs = []
-        for _ in range(levels):
-            ssim, cs = self.compute_ssim(img1, img2)
-
-            # Relu normalize (not compliant with original definition)
-            ssims.append(ssim)
-            mcs.append(cs)
-
-            img1 = F.avg_pool2d(img1, (2, 2))
-            img2 = F.avg_pool2d(img2, (2, 2))
-
-        ssims = torch.stack(ssims, dim=1)
-        mcs = torch.stack(mcs, dim=1)
-
-        # Simple normalize (not compliant with original definition)
-        # TODO: remove support for normalize == True (kept for backward support)
-        ssims = (ssims + 1) / 2
-        mcs = (mcs + 1) / 2
-
-        pow1 = mcs ** weights.reshape(1, weights.shape[0])
-        pow2 = ssims ** weights.reshape(1, weights.shape[0])
-
-        # From Matlab implementation https://ece.uwaterloo.ca/~z70wang/research/iwssim/
-        output = torch.prod(pow1[:, :-1] * pow2[:, -1].reshape(-1, 1), dim=1)
-        return output
+        return improc.compute_msssim(img1, img2, self.window, 
+                                               self.ssim_window_size, self.num_channel)
     
     @staticmethod
     def batch_lab_convert(img_batch):
-        converted_batch = ImageProcessing.rgb_to_lab(img_batch)
+        converted_batch = improc.rgb_to_lab(img_batch)
         converted_batch = torch.clamp(converted_batch, 0.0, 1.0)
         return converted_batch
     
@@ -183,7 +69,7 @@ class CURLLoss(nn.Module):
     @staticmethod
     def batch_hsv_convert(img_batch):
         # Batch calculate HSV values
-        img_batch_hsv = ImageProcessing.rgb_to_hsv(img_batch)
+        img_batch_hsv = improc.rgb_to_hsv(img_batch)
         img_batch_hsv = torch.clamp(img_batch_hsv, 0.0, 1.0)
                                         
         img_batch_hue = 2*math.pi*img_batch_hsv[:, 0, :, :]
@@ -197,7 +83,7 @@ class CURLLoss(nn.Module):
         return img_batch_hsv
         
 
-    def forward(self, predicted_img_batch, target_img_batch, gradient_regulariser):
+    def forward(self, predicted_img_batch, target_img_batch):
         """Forward function for the CURL loss
 
         :param predicted_img_batch_high_res: 
@@ -207,86 +93,51 @@ class CURLLoss(nn.Module):
         :rtype: float
 
         """
-        rgb_loss_value = F.l1_loss(predicted_img_batch, target_img_batch)
-        cosine_rgb_loss_value = (1.0 - torch.nn.functional.cosine_similarity(predicted_img_batch, 
-                                                                             target_img_batch, dim=1).mean(dim=(1, 2))).mean()
+        mask = torch.logical_not(torch.logical_and((0 == predicted_img_batch).all(dim=1),
+                                                   (0 == target_img_batch).all(dim=1)))
+        unmasked_pixels = mask.sum()
+        
+        rgb_loss_value = F.l1_loss(predicted_img_batch, target_img_batch, reduction='sum')/unmasked_pixels
+        
+        # Cosine similarity for #000000 (black) should be 1. Accomplishing this by
+        # finding mask values and manually setting similarity to 1. 
+        base_cos_sim = torch.nn.functional.cosine_similarity(predicted_img_batch, target_img_batch, dim=1)
+        cosine_rgb_loss_value = (1.0 - (base_cos_sim + torch.logical_not(mask)).mean(dim=(1, 2))).mean()
         
         target_img_batch_lab = self.batch_lab_convert(target_img_batch)
         predicted_img_batch_lab = self.batch_lab_convert(predicted_img_batch)
-        l1_loss_value = F.l1_loss(predicted_img_batch_lab, target_img_batch_lab)
+        l1_loss_value = F.l1_loss(predicted_img_batch_lab, target_img_batch_lab, reduction='sum')/unmasked_pixels
             
         target_img_batch_L_ssim = self.batch_L_ssim_convert(target_img_batch_lab)
-        del target_img_batch_lab
         predicted_img_batch_L_ssim = self.batch_L_ssim_convert(predicted_img_batch_lab)
-        del predicted_img_batch_lab
         ssim_loss_value = (1.0 - self.compute_msssim(predicted_img_batch_L_ssim , target_img_batch_L_ssim)).mean()
-        del target_img_batch_L_ssim, predicted_img_batch_L_ssim
         
         target_img_batch_hsv = self.batch_hsv_convert(target_img_batch)
         predicted_img_batch_hsv = self.batch_hsv_convert(predicted_img_batch)
-        hsv_loss_value = F.l1_loss(predicted_img_batch_hsv, target_img_batch_hsv) # FIXME - this is NaN always...
-        del target_img_batch_hsv, predicted_img_batch_hsv
-                                 
-        grad_reg = gradient_regulariser.mean()   
+        hsv_loss_value = F.l1_loss(predicted_img_batch_hsv, target_img_batch_hsv, reduction='sum')/unmasked_pixels
 
-        curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value
-                     + hsv_loss_value + 10*ssim_loss_value + 1e-6*grad_reg)/6
-        del rgb_loss_value, cosine_rgb_loss_value, hsv_loss_value, l1_loss_value, ssim_loss_value, grad_reg
+        curl_loss = (rgb_loss_value +
+                     cosine_rgb_loss_value +
+                     l1_loss_value +
+                     hsv_loss_value +
+                     10*ssim_loss_value
+                    )/5
 
         return curl_loss
 
 
 class CURLLayer(nn.Module):
 
-    import torch.nn.functional as F
-    
-    converter_map = {
-        ('rgb', 'lab'): ImageProcessing.rgb_to_lab,
-        ('lab', 'rgb'): ImageProcessing.lab_to_rgb,
-        ('rgb', 'hsv'): ImageProcessing.rgb_to_hsv,
-        ('hsv', 'rgb'): ImageProcessing.hsv_to_rgb
+    def __init__(self, num_lab_points=48, num_rgb_points=48, 
+                 num_hsv_points=64):
         
-    }
-
-    def __init__(self, num_in_channels=64, num_out_channels=64):
-        """Initialisation of class
-
-        :param num_in_channels: number of input channels
-        :param num_out_channels: number of output channels
-        :returns: N/A
-        :rtype: N/A
-
-        """
         super(CURLLayer, self).__init__()
 
-        self.num_in_channels = num_in_channels
-        self.num_out_channels = num_out_channels
-        self.make_init_network()
+        self.num_lab_points = num_lab_points
+        self.num_rgb_points = num_rgb_points
+        self.num_hsv_points = num_hsv_points
 
-    def make_init_network(self):
-        """ Initialise the CURL block layers
-
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        self.lab_stack = ConvStack(conv_in=64, conv_out=64, curve_out=48, dropout=0.5)
-        self.rgb_stack = ConvStack(conv_in=64, conv_out=64, curve_out=48, dropout=0.5)
-        self.hsv_stack = ConvStack(conv_in=64, conv_out=64, curve_out=64, dropout=0.5)
-        
-    def convert(self, img, source, target):            
-        img = torch.clamp(img, 0.0, 1.0)    
-        converter = self.converter_map.get((source, target))
-        
-        if converter is None:
-            ValueError("`source` and `target` must be one of: {}".format(self.converter_map.keys()))
-        
-        new_img = converter(img)
-        new_img = torch.clamp(new_img, 0.0, 1.0)
-        
-        return new_img
-
-    def forward(self, x):
+    def forward(self, img, L, R, H):
         """Forward function for the CURL layer
 
         :param x: forward the data x through the network 
@@ -297,121 +148,214 @@ class CURLLayer(nn.Module):
 
         '''
         This function is where the magic happens :)
-        '''
-        
-        x.contiguous()  # remove memory holes        
-        feat = x[:, 3:64, :, :]
-        img = x[:, 0:3, :, :]
+        '''        
+        mask = torch.unsqueeze(torch.logical_not((img == 0).all(dim=1)), 1)
 
         # RGB -> LAB, modify LAB
-        img_lab = self.convert(img, 'rgb', 'lab')
+        img_lab = improc.rgb_to_lab(img)
         feat_lab = torch.cat((feat, img_lab), 1)
-        L = self.lab_stack(feat_lab)
-        img_lab, gradient_regulariser_lab = ImageProcessing.adjust_lab(img_lab, L[:, 0:48])
+        img_lab, gradient_regulariser_lab = improc.adjust_lab(img_lab, L[:, :self.num_lab_points])
+        img_lab = img_lab * mask
         
         # LAB -> RGB, modify RGB
-        img_rgb = self.convert(img_lab, 'lab', 'rgb')
+        img_rgb = improc.lab_to_rgb(img_lab)
         feat_rgb = torch.cat((feat, img_rgb), 1)
-        R = self.rgb_stack(feat_rgb)
-        img_rgb, gradient_regulariser_rgb = ImageProcessing.adjust_rgb(img_rgb, R[:, 0:48])
+        img_rgb, gradient_regulariser_rgb = improc.adjust_rgb(img_rgb, R[:, :self.num_rgb_points])
+        img_rgb = img_rgb * mask
         
         # RGB -> HSV, modify HSV
-        img_hsv = self.convert(img_rgb, 'rgb', 'hsv')
+        img_hsv = improc.rgb_to_hsv(img_rgb)
         feat_hsv = torch.cat((feat, img_hsv), 1)
-        H = self.hsv_stack(feat_hsv)
-        img_hsv, gradient_regulariser_hsv = ImageProcessing.adjust_hsv(img_hsv, H[:, 0:64])
+        img_hsv, gradient_regulariser_hsv = improc.adjust_hsv(img_hsv, H[:, :self.num_hsv_points])
+        img_hsv = img_hsv * mask
         
         # HSV -> RGB, calculate residual and final image
-        img_residual = self.convert(img_hsv, 'hsv', 'rgb')
-        img = torch.clamp(img + img_residual, 0.0, 1.0)
+        img_residual = improc.hsv_to_rgb(img_hsv)
+        img = torch.clamp(img + img_residual, 0.0, 1.0) * mask
         
         gradient_regulariser = (gradient_regulariser_rgb +
                                 gradient_regulariser_lab +
                                 gradient_regulariser_hsv)
 
         return img, gradient_regulariser
-
-
-class ConvBlock(nn.Module):
-
-    def __init__(self, in_channels, out_channels, stride=1):
-        super(ConvBlock, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3,
-                              stride=stride, padding=1, bias=True)
-        self.lrelu = nn.LeakyReLU()
-
-    def forward(self, x):
-        return self.lrelu(self.conv(x))
     
-class ConvStack(nn.Module):
+
+class GCURLNet(nn.Module):
+        
+    def __init__(self, num_lab_points=48, num_rgb_points=48, num_hsv_points=64):
+        super(GCURLNet, self).__init__()
+        self.num_lab_points = num_lab_points
+        self.num_rgb_points = num_rgb_points
+        self.num_hsv_points = num_hsv_points
+        self.curve_break_1 = num_lab_points
+        self.curve_break_2 = num_lab_points + num_rgb_points
+        
+        self.backbone = timm.create_model('efficientnetv2_rw_s', pretrained=True)
+        self.backbone.classifier = nn.Sequential(nn.Linear(in_features=1792, 
+                                                           out_features=self.num_spaces*self.num_channels*self.num_coeffs)
+                                               )
+        self.curllayer = CURLLayer(self.num_lab_points, self.num_rgb_points, self.num_hsv_points)
     
-    def __init__(self, conv_in=64, conv_out=64, curve_out=48, dropout=0.5):
-        super(ConvStack, self).__init__()
-        self.layer1 = ConvBlock(conv_in, conv_out)
-        self.layer2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.layer3 = ConvBlock(conv_in, conv_out)
-        self.layer4 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.layer5 = ConvBlock(conv_in, conv_out)
-        self.layer6 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.layer7 = ConvBlock(conv_in, conv_out)
-        self.layer8 = nn.AdaptiveAvgPool2d(1)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = torch.nn.Linear(conv_in, curve_out)
+    def forward(self, img, L, R, H):
+        curves = self.backbone(img)
+        L, R, H = curves[:, :self.curve_break_1], \
+                  curves[:, self.curve_break_1:self.curve_break_2], \
+                  curves[:, self.curve_break_2:]
         
-    def forward(self, feat_maps):
-        x = self.layer1(feat_maps)
-        del feat_maps
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        x = self.layer5(x)
-        x = self.layer6(x)
-        x = self.layer7(x)
-        x = self.layer8(x)
-        x = x.view(x.size()[0], -1)
-        x = self.dropout(x)
-        C = self.fc(x)
-        
-        return C
-
-
-class CURLNet(nn.Module):
-
-    def __init__(self):
-        """Initialisation function
-
-        :returns: initialises parameters of the neural networ
-        :rtype: N/A
-
-        """
-        super(CURLNet, self).__init__()
-        self.tednet = rgb_ted.TEDModel()
-        self.curllayer = CURLLayer()
-
-    def forward(self, img):
-        """Neural network forward function
-
-        :param img: forward the data img through the network
-        :returns: residual image
-        :rtype: numpy ndarray
-
-        """
-        feat = self.tednet(img)
-        img, gradient_regulariser = self.curllayer(feat)
+        img, gradient_regulariser = self.curllayer(img, L, R, H)
+    
         return img, gradient_regulariser
 
-class CURLGlobalNet(nn.Module):
-
-    def __init__(self):
-        super(CURLGlobalNet, self).__init__()
-        self.final_conv = nn.Conv2d(3, 61, 3, 1, 0, 1)
-        self.refpad = nn.ReflectionPad2d(1)
-        self.curllayer = CURLLayer()
-
-    def forward(self, img):
-        img_pad = self.refpad(img)
-        feats = self.final_conv(img_pad)
-        full_input = torch.cat((img, feats), dim=1)
         
-        return self.curllayer(full_input)
+class ChannelPolyLayer(nn.Module):
     
+    def __init__(self, degree=3, num_variables=3, num_out=None):
+        assert degree >= 0 and type(degree) == int, "`degree` must be non-negative integer"
+        assert num_variables >= 0 and type(num_variables) == int, "`num_variables` must be non-negative integer"
+        
+        super(ChannelPolyLayer, self).__init__()
+        self.degree = degree
+        self.num_variables = num_variables
+        self.num_out = self.num_variables if num_out is None else num_out
+        self.num_coeffs = ChannelPolyLayer.ncr(num_variables + degree, degree)
+        self.powers = torch.Tensor(list(ChannelPolyLayer.generate_powers(degree, num_variables))).cuda()
+        
+        assert self.powers.shape[0] == self.num_coeffs,\
+            "Number of coefficients and powers should match"
+     
+    @staticmethod
+    def generate_powers(order, n_variables):
+        """
+        Find the exponents of a multivariate polynomial expression of order
+        `order` and `n_variable` number of variables. 
+        From: https://stackoverflow.com/questions/4913902/optimize-generator-for-multivariate-polynomial-exponents
+        """
+        pattern = [0] * n_variables
+        yield tuple(pattern)
+        for current_sum in range(1, order+1):
+            pattern[0] = current_sum
+            yield tuple(pattern)
+            while pattern[-1] < current_sum:
+                for i in range(2, n_variables + 1):
+                    if 0 < pattern[n_variables - i]:
+                        pattern[n_variables - i] -= 1
+                        if 2 < i:
+                            pattern[n_variables - i + 1] = 1 + pattern[-1]
+                            pattern[-1] = 0
+                        else:
+                            pattern[-1] += 1
+                        break
+                yield tuple(pattern)
+            pattern[-1] = 0
+    
+    @staticmethod
+    def ncr(n, r):
+        r = min(r, n-r)
+        numer = reduce(op.mul, range(n, n-r, -1), 1)
+        denom = reduce(op.mul, range(1, r+1), 1)
+        return numer // denom  # or / in Python 2
+        
+    def forward(self, img, coeffs):
+        assert img.shape[1] == self.num_variables, \
+        "There should be a polynomial variable per channel"
+        assert coeffs.shape[2] == self.num_coeffs,\
+            "For degree {} and number of variables {} the number of required " \
+            "coefficients (coeffs.shape[1]) is {}".format(degree, num_variables, self.num_coeffs)
+        assert len(coeffs.shape) == 3,\
+            "Coefficients be 2D tensor of shape (batch size, num coefficients)"
+        
+        """
+        Dims (batch size, out channels, x, y, num coeffs)
+        Creates polynomial terms, e.g. for degree 3 polynomial with
+        2 variables polynomial_terms.shape[-1] equals 10 with the 
+        the last dimension of this tensor equal to 
+        (1, x, y, x^2, xy, y^2, x^3, x^2y^1, x^1y^2, y^3)
+        Note that in our case our polynomial has variables equal to
+        the number of channels/colors in the image, so x, y here should
+        not be interpreted as spatial coordinates.
+        
+        Note we can have different input channels `self.num_variables`
+        and output channels `self.num_out`. This allows us to for example
+        output 3 color channels from a 5 dimensional image input where 3
+        channels are colors and the other 2 are spatial coordinates.
+        """
+        img_us = torch.unsqueeze(img, dim=0)
+        pwrs_rs = self.powers.reshape(self.num_coeffs, 1, self.num_variables, 1, 1)
+        poly_terms = torch.permute(torch.pow(img_us, pwrs_rs), [1, 2, 3, 4, 0]).prod(dim=1)
+        
+        """
+        Dims (batch size, out channels, x, y)
+        Continuing the example above, we take the polynomial terms,
+        multiply by their learned coefficients, and sum to get
+        a + bx + cy dx^2 + exy + fy^2 + gx^3 + hx^2y^1 + ix^1y^2 + jy^3)
+        where coeffs is the tensor containing the predicted 
+        (a, b, c, d, e, f, g, h, i, j) for each image in the minibatch.
+        """
+        
+        return (coeffs.reshape(img.shape[0], self.num_out, 1, 1, self.num_coeffs) * \
+                torch.unsqueeze(poly_terms, dim=1)).sum(dim=-1)
+        
+    
+class PolyRegNet(nn.Module):
+    
+    def __init__(self, num_channels=3, polynomial_order=4):
+        super(PolyRegNet, self).__init__()
+        self.num_channels = num_channels
+        self.order = polynomial_order
+        self.polylayer = ChannelPolyLayer(degree=self.order, num_variables=self.num_channels)
+        self.num_coeffs = self.polylayer.num_coeffs
+        
+        self.backbone = timm.create_model('efficientnetv2_rw_s', pretrained=True)
+        self.backbone.classifier = nn.Linear(in_features=1792, 
+                                             out_features=self.num_channels*self.num_coeffs)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, img):
+        mask = torch.unsqueeze(torch.logical_not((img == 0).all(dim=1)), 1)
+        coeffs = self.backbone(img).reshape(img.shape[0], self.num_channels, self.num_coeffs)
+        final_img = self.sigmoid(self.polylayer(img, coeffs)) * mask
+        
+        return final_img
+    
+
+class TriSpaceRegNet(nn.Module):
+    
+    def __init__(self, polynomial_order=4):
+        super(TriSpaceRegNet, self).__init__()
+        self.num_channels = 3
+        self.num_spaces = 3
+        self.order = polynomial_order
+        self.polylayer = ChannelPolyLayer(degree=self.order, num_variables=self.num_channels)
+        self.num_coeffs = self.polylayer.num_coeffs
+        
+        self.backbone = timm.create_model('efficientnetv2_rw_s', pretrained=True)
+        self.backbone.classifier = nn.Sequential(nn.Linear(in_features=1792, out_features=1792), # 1280 in for b0
+                                                 nn.Linear(in_features=1792, out_features=896),  
+                                                 nn.Linear(in_features=896, out_features=896),
+                                                 nn.Linear(in_features=896, out_features=448),
+                                                 nn.Linear(in_features=448, out_features=448),
+                                                 nn.Linear(in_features=448, out_features=self.num_spaces*self.num_channels*self.num_coeffs)
+                                               )
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, img):
+        mask = torch.unsqueeze(torch.logical_not((img == 0).all(dim=1)), 1)        
+        coeffs = self.backbone(img).reshape(img.shape[0], self.num_spaces, 
+                                            self.num_channels, self.num_coeffs)
+        
+        R, L, H = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
+        img_rgb = img
+        img_lab = improc.rgb_to_lab(img)
+        img_hsv = improc.rgb_to_hsv(img)
+        
+        rgb_res = self.sigmoid(self.polylayer(img_rgb, R))
+        lab_res = improc.lab_to_rgb(self.sigmoid(self.polylayer(img_lab, L)))
+        hsv_res = improc.hsv_to_rgb(self.sigmoid(self.polylayer(img_hsv, H)))
+        
+        rgb_res = 2 * (rgb_res - 0.5) * mask
+        lab_res = 2 * (lab_res - 0.5) * mask
+        hsv_res = 2 * (hsv_res - 0.5) * mask
+        
+        final_img = img + rgb_res + lab_res + hsv_res
+        
+        return final_img
