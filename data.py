@@ -90,12 +90,11 @@ class Dataset(torch.utils.data.Dataset):
         self.transform = transform
         self.data_dict = data_dict
         self.normaliser = normaliser
-        self.is_valid = is_valid
-        self.is_inference = is_inference
+        self.is_train = is_train
         self.crop_h, self.crop_w = crop_h, crop_w
         
         
-        if not self.is_valid and not self.is_inference:
+        if self.is_train:
             self.cropper = trans.RandomCrop((self.crop_h, self.crop_w),
                                              pad_if_needed=True,
                                              fill=0,
@@ -140,7 +139,7 @@ class Dataset(torch.utils.data.Dataset):
         input_img, output_img = TF.to_tensor(input_img), TF.to_tensor(output_img)
         input_img, output_img = self.cropper(input_img), self.cropper(output_img)
 
-        if not self.is_valid and not self.is_inference:
+        if self.is_train:
             for transform in self.transforms:
                 input_img, output_img = transform(input_img), transform(output_img)
 
