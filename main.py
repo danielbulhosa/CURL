@@ -53,8 +53,10 @@ import os
 import metric
 import model
 import sys
+from torchsummary import summary
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+
 np.set_printoptions(threshold=sys.maxsize)
 
 def main():
@@ -121,7 +123,7 @@ def main():
         
         inference_dataset = data.Dataset(data_dict=inference_data_dict,
                                          transform=transforms.Compose([transforms.ToTensor()]), normaliser=1,
-                                         is_inference=True)
+                                         is_train=False)
 
         inference_data_loader = torch.utils.data.DataLoader(inference_dataset, batch_size=batch_size, shuffle=False,
                                                             num_workers=10)
@@ -132,7 +134,7 @@ def main():
         logging.info(
             "Performing inference with images in directory: " + inference_img_dirpath)
 
-        net = model.CURLNet()
+        net = model.TriSpaceRegNet(polynomial_order=4)
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
         net.load_state_dict(checkpoint['model_state_dict'])
         net.eval()
@@ -142,7 +144,7 @@ def main():
         inference_evaluator = metric.Evaluator(
             criterion, inference_data_loader, "test", log_dirpath)
 
-        inference_evaluator.evaluate(net, epoch=0)
+        inference_evaluator.evaluate(net, epoch=0, save_images=True)
 
     else:
         
@@ -154,19 +156,18 @@ def main():
         training_data_dict = data.filter_data_dict(data_dict, training_ids)
         validation_data_dict = data.filter_data_dict(data_dict, valid_ids)
         
-        training_dataset = data.Dataset(data_dict=training_data_dict, normaliser=1, is_valid=False)
-        validation_dataset = data.Dataset(data_dict=validation_data_dict, normaliser=1, is_valid=True)
+        training_dataset = data.Dataset(data_dict=training_data_dict, normaliser=1, is_train=True)
+        validation_dataset = data.Dataset(data_dict=validation_data_dict, normaliser=1, is_train=False)
 
         training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True,
-                                                           pin_memory=True, num_workers=6)
+                                                           pin_memory=True, num_workers=4)
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
-                                                             pin_memory=True, num_workers=6)
+                                                             pin_memory=True, num_workers=4)
    
-        net = model.CURLGlobalNet()
+        net = model.TriSpaceRegNet(polynomial_order=4)
         net.cuda()
-
+        model_parameters = filter(lambda p: p.requires_grad, net.parameters())
         logging.info('######### Network created #########')
-
         criterion = model.CURLLoss(ssim_window_size=5)
 
         '''
@@ -180,7 +181,7 @@ def main():
             checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
             net.load_state_dict(checkpoint['model_state_dict'])
             optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      net.parameters()), lr=1e-4, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-10)
+                                      net.parameters()), lr=1e-4, betas=(0.9, 0.999), eps=1e-08)
 
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             for g in optimizer.param_groups:
@@ -190,20 +191,22 @@ def main():
             loss = checkpoint['loss']
             net.cuda()
         else:
-            optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                   net.parameters()), lr=1e-4, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-10)
-
+            optimizer = optim.Adam(net.parameters(), lr=1e-4, betas=(0.9, 0.999), eps=1e-08)
+            
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
         best_valid_psnr = 0.0
-
         optimizer.zero_grad()
         net.train()
 
-        for epoch in range(start_epoch,num_epoch):
+        for epoch in range(start_epoch, num_epoch):
+            
             logging.info("######### Epoch {}: Train #########".format(epoch + 1))
+            logging.info('Learning rate: {}'.format(optimizer.param_groups[0]['lr']))
 
             # train loss
             examples = 0.0
             running_loss = 0.0
+            batches = 0.0
             
             batch_pbar = tqdm(enumerate(training_data_loader, 0), total=len(training_data_loader))
 
@@ -211,60 +214,58 @@ def main():
                 input_img_batch, gt_img_batch = data['input_img'].cuda(non_blocking=True), \
                                                 data['output_img'].cuda(non_blocking=True)
                 
-                net_img_batch, gradient_regulariser = net(input_img_batch)
-                del input_img_batch
+                net_img_batch = net(input_img_batch)
                 net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
                 
-                loss = criterion(net_img_batch, gt_img_batch, gradient_regulariser)
-                del net_img_batch, gt_img_batch, gradient_regulariser
-                optimizer.zero_grad(set_to_none=True)
+                loss = criterion(net_img_batch, gt_img_batch)
+                
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
                 loss_scalar = loss.data.item()
                 running_loss += loss_scalar
                 examples += batch_size
+                batches += 1
                 
                 writer.add_scalar('Loss/train', loss_scalar, examples)
                 batch_pbar.set_description('Epoch {}. Train Loss: {}'.format(epoch, loss_scalar))
 
-
             logging.info('[%d] train loss: %.15f' %
-                         (epoch + 1, running_loss / examples))
-            writer.add_scalar('Loss/train_smooth', running_loss / examples, epoch + 1)
-
+                         (epoch + 1, running_loss / batches))
+            writer.add_scalar('Loss/train_smooth', running_loss / batches, epoch + 1)
+            scheduler.step(running_loss / batches)
+            
             # Valid loss
             if (epoch + 1) % valid_every == 0:
-
+                net.eval()
                 logging.info("######### Epoch {}: Validation #########".format(epoch + 1))
 
                 valid_loss, valid_psnr, valid_ssim = validation_evaluator.evaluate(net, epoch)
 
-                # update best validation set psnr
-                if valid_psnr > best_valid_psnr:
+                logging.info(
+                    "Saving checkpoint to file: " + 
+                    'curl_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr, valid_loss, epoch))
 
-                    logging.info(
-                        "Validation PSNR has increased. Saving the more accurate model to file: " + 
-                        'curl_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr, valid_loss, epoch))
+                best_valid_psnr = valid_psnr
+                snapshot_prefix = os.path.join(
+                    log_dirpath, 'curl')
+                snapshot_path = snapshot_prefix + '_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr,
+                                                                                                        valid_loss,
+                                                                                                        epoch + 1)
+                '''
+                torch.save(net, snapshot_path)
+                '''
 
-                    best_valid_psnr = valid_psnr
-                    snapshot_prefix = os.path.join(
-                        log_dirpath, 'curl')
-                    snapshot_path = snapshot_prefix + '_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr,
-                                                                                                            valid_loss,
-                                                                                                            epoch + 1)
-                    '''
-                    torch.save(net, snapshot_path)
-                    '''
-
-                    torch.save({
-                        'epoch': epoch+1,
-                         'model_state_dict': net.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                         'loss': loss,
-                         }, snapshot_path)
+                torch.save({
+                    'epoch': epoch+1,
+                     'model_state_dict': net.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                     'loss': valid_loss,
+                     }, snapshot_path)
 
                 net.train()
+
 
 if __name__ == "__main__":
     main()
