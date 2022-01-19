@@ -17,7 +17,6 @@ import sys
 import torch
 import torch.nn as nn
 from collections import defaultdict
-import rgb_ted
 import image_processing as improc
 from torch.autograd import Variable
 import math
@@ -320,12 +319,16 @@ class PolyRegNet(nn.Module):
 
 class TriSpaceRegNet(nn.Module):
     
-    def __init__(self, polynomial_order=4):
+    def __init__(self, polynomial_order=4, spatial=False, 
+                 height=256, width=256, minibatch_size=16):
         super(TriSpaceRegNet, self).__init__()
         self.num_channels = 3
         self.num_spaces = 3
+        self.num_in = self.num_channels + 2 * spatial
         self.order = polynomial_order
-        self.polylayer = ChannelPolyLayer(degree=self.order, num_variables=self.num_channels)
+        self.polylayer = ChannelPolyLayer(degree=self.order, 
+                                          num_variables=self.num_in,
+                                          num_out=self.num_channels)
         self.num_coeffs = self.polylayer.num_coeffs
         
         self.backbone = timm.create_model('efficientnetv2_rw_s', pretrained=True)
@@ -337,6 +340,21 @@ class TriSpaceRegNet(nn.Module):
                                                  nn.Linear(in_features=448, out_features=self.num_spaces*self.num_channels*self.num_coeffs)
                                                )
         self.sigmoid = nn.Sigmoid()
+        
+        if not spatial:
+            self.x = torch.zeros(minibatch_size, 0, height, width).cuda()
+            self.y = torch.zeros(minibatch_size, 0, height, width).cuda()
+        else:
+            self.x = (torch.arange(0, width)/width).reshape(1, 1, 1, width)\
+                                                   .repeat(minibatch_size, 1, height, 1).cuda()
+            self.y = (torch.arange(0, height)/height).reshape(1, 1, height, 1)\
+                                                     .repeat(minibatch_size, 1, 1, width).cuda()
+            
+    def cat_coords(self, img):
+        """
+        Concatenates coordinate values to channel dimension
+        """
+        return torch.cat([img, self.x[:img.shape[0]], self.y[:img.shape[0]]], dim=1)
     
     def forward(self, img):
         mask = torch.unsqueeze(torch.logical_not((img == 0).all(dim=1)), 1)        
@@ -344,9 +362,9 @@ class TriSpaceRegNet(nn.Module):
                                             self.num_channels, self.num_coeffs)
         
         R, L, H = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
-        img_rgb = img
-        img_lab = improc.rgb_to_lab(img)
-        img_hsv = improc.rgb_to_hsv(img)
+        img_rgb = self.cat_coords(img)
+        img_lab = self.cat_coords(improc.rgb_to_lab(img))
+        img_hsv = self.cat_coords(improc.rgb_to_hsv(img))
         
         rgb_res = self.sigmoid(self.polylayer(img_rgb, R))
         lab_res = improc.lab_to_rgb(self.sigmoid(self.polylayer(img_lab, L)))
