@@ -20,6 +20,7 @@ from collections import defaultdict
 import logging
 import os
 import image_processing
+import torchvision.transforms as trans
 import torchvision.transforms.functional as TF
 import random
 import matplotlib.pyplot as plt
@@ -87,7 +88,6 @@ class Dataset(torch.utils.data.Dataset):
         :rtype: N/A
 
         """
-        self.transform = transform
         self.data_dict = data_dict
         self.normaliser = normaliser
         self.is_train = is_train
