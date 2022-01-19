@@ -19,7 +19,7 @@ from abc import ABCMeta, abstractmethod
 from collections import defaultdict
 import logging
 import os
-import util
+import image_processing
 import torchvision.transforms.functional as TF
 import random
 import matplotlib.pyplot as plt
@@ -77,7 +77,8 @@ def filter_data_dict(data_dict, image_id_list):
 
 class Dataset(torch.utils.data.Dataset):
 
-    def __init__(self, data_dict, transform=None, normaliser=2 ** 8 - 1, is_valid=False, is_inference=False):
+    def __init__(self, data_dict, normaliser=2 ** 8 - 1, 
+                 is_train=False, crop_h=256, crop_w=256):
         """Initialisation for the Dataset object
 
         :param data_dict: dictionary of dictionaries containing images
@@ -91,22 +92,22 @@ class Dataset(torch.utils.data.Dataset):
         self.normaliser = normaliser
         self.is_valid = is_valid
         self.is_inference = is_inference
+        self.crop_h, self.crop_w = crop_h, crop_w
         
-    @staticmethod
-    def pad(image_tensor, crop_height, crop_width):
-        image_height, image_width = image_tensor.shape[1:]
-
-        if crop_width > image_width or crop_height > image_height:
-            padding_ltrb = [
-            (crop_width - image_width) // 2 if crop_width > image_width else 0,
-            (crop_height - image_height) // 2 if crop_height > image_height else 0,
-            (crop_width - image_width + 1) // 2 if crop_width > image_width else 0,
-            (crop_height - image_height + 1) // 2 if crop_height > image_height else 0,
-            ]
-            return TF.pad(image_tensor, padding_ltrb, fill=0)
+        
+        if not self.is_valid and not self.is_inference:
+            self.cropper = trans.RandomCrop((self.crop_h, self.crop_w),
+                                             pad_if_needed=True,
+                                             fill=0,
+                                             padding_mode='constant'
+                                            )
         else:
-            return image_tensor
-        
+            self.cropper = trans.CenterCrop((self.crop_h, self.crop_w))
+            
+        self.rotator = trans.RandomRotation(180, expand=False, fill=0)
+        self.hflipper = trans.RandomHorizontalFlip(0.5)
+        self.vflipper = trans.RandomVerticalFlip(0.5)
+        self.transforms = [self.hflipper, self.vflipper, self.rotator]
 
     def __len__(self):
         """Returns the number of images in the dataset
@@ -128,39 +129,20 @@ class Dataset(torch.utils.data.Dataset):
 
         """
 
-        input_img = util.ImageProcessing.load_image(
+        input_img = image_processing.load_image(
             self.data_dict[idx]['input_img'], normaliser=self.normaliser)
-        output_img = util.ImageProcessing.load_image(
+        output_img = image_processing.load_image(
             self.data_dict[idx]['output_img'], normaliser=self.normaliser)
 
         if self.normaliser==1:
             input_img, output_img = input_img.astype(np.uint8), output_img.astype(np.uint8)
 
         input_img, output_img = TF.to_tensor(input_img), TF.to_tensor(output_img)
-        # FIXME - better options here:
-        #   - Have a crop size range instead of a fixed number
-        #   - Analyze data to come up with better fixed crop size
-        #   - Do a random crop instead of a center crop
-        crop_h, crop_w = 256, 256
-        input_img, output_img = self.pad(input_img, crop_h, crop_w), self.pad(output_img, crop_h, crop_w)
-        input_img, output_img = TF.center_crop(input_img, (crop_h, crop_w)), TF.center_crop(output_img, (crop_h, crop_w))
+        input_img, output_img = self.cropper(input_img), self.cropper(output_img)
 
         if not self.is_valid and not self.is_inference:
-
-                # Random horizontal flipping
-                if random.random() > 0.5:
-                    input_img, output_img = TF.hflip(input_img), TF.hflip(output_img)
-
-                # Random vertical flipping
-                if random.random() > 0.5:
-                    input_img, output_img = TF.vflip(input_img), TF.vflip(output_img)
-                  
-                # Random modulo 90 degree rotation
-                rotation = int(np.random.choice([-90, 0, 90, 180]))
-                if rotation != 0:
-                    input_img, output_img = TF.rotate(input_img, rotation, expand=True),\
-                                            TF.rotate(output_img, rotation, expand=True)
-
+            for transform in self.transforms:
+                input_img, output_img = transform(input_img), transform(output_img)
 
         return {'input_img': input_img, 'output_img': output_img,
                 'name': self.data_dict[idx]['input_img'].split("/")[-1]}
