@@ -82,7 +82,7 @@ class CURLLoss(nn.Module):
         return img_batch_hsv
         
 
-    def forward(self, predicted_img_batch, target_img_batch):
+    def forward(self, predicted_img_batch, target_img_batch, mask):
         """Forward function for the CURL loss
 
         :param predicted_img_batch_high_res: 
@@ -92,9 +92,9 @@ class CURLLoss(nn.Module):
         :rtype: float
 
         """
-        mask = torch.logical_not(torch.logical_and((0 == predicted_img_batch).all(dim=1),
-                                                   (0 == target_img_batch).all(dim=1)))
+        # Apply mask for purposes of loss function
         unmasked_pixels = mask.sum()
+        predicted_img_batch, target_img_batch = predicted_img_batch * mask, target_img_batch * mask
         
         rgb_loss_value = F.l1_loss(predicted_img_batch, target_img_batch, reduction='sum')/unmasked_pixels
         
@@ -136,7 +136,7 @@ class CURLLayer(nn.Module):
         self.num_rgb_points = num_rgb_points
         self.num_hsv_points = num_hsv_points
 
-    def forward(self, img, L, R, H):
+    def forward(self, img, mask, L, R, H):
         """Forward function for the CURL layer
 
         :param x: forward the data x through the network 
@@ -148,7 +148,6 @@ class CURLLayer(nn.Module):
         '''
         This function is where the magic happens :)
         '''        
-        mask = torch.unsqueeze(torch.logical_not((img == 0).all(dim=1)), 1)
 
         # RGB -> LAB, modify LAB
         img_lab = improc.rgb_to_lab(img)
@@ -195,13 +194,13 @@ class GCURLNet(nn.Module):
                                                )
         self.curllayer = CURLLayer(self.num_lab_points, self.num_rgb_points, self.num_hsv_points)
     
-    def forward(self, img, L, R, H):
+    def forward(self, img, mask, L, R, H):
         curves = self.backbone(img)
         L, R, H = curves[:, :self.curve_break_1], \
                   curves[:, self.curve_break_1:self.curve_break_2], \
                   curves[:, self.curve_break_2:]
         
-        img, gradient_regulariser = self.curllayer(img, L, R, H)
+        img, gradient_regulariser = self.curllayer(img, mask, L, R, H)
     
         return img, gradient_regulariser
 
@@ -309,8 +308,7 @@ class PolyRegNet(nn.Module):
                                              out_features=self.num_channels*self.num_coeffs)
         self.sigmoid = nn.Sigmoid()
         
-    def forward(self, img):
-        mask = torch.unsqueeze(torch.logical_not((img == 0).all(dim=1)), 1)
+    def forward(self, img, mask):
         coeffs = self.backbone(img).reshape(img.shape[0], self.num_channels, self.num_coeffs)
         final_img = self.sigmoid(self.polylayer(img, coeffs)) * mask
         
@@ -356,12 +354,7 @@ class TriSpaceRegNet(nn.Module):
         """
         return torch.cat([img, self.x[:img.shape[0]], self.y[:img.shape[0]]], dim=1)
     
-    def forward(self, img):
-        mask = torch.unsqueeze(torch.logical_not((img == 0).all(dim=1)), 1)        
-        coeffs = self.backbone(img).reshape(img.shape[0], self.num_spaces, 
-                                            self.num_channels, self.num_coeffs)
-        
-        R, L, H = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
+    def generate_image(self, img, R, L, H):
         img_rgb = self.cat_coords(img)
         img_lab = self.cat_coords(improc.rgb_to_lab(img))
         img_hsv = self.cat_coords(improc.rgb_to_hsv(img))
@@ -370,10 +363,19 @@ class TriSpaceRegNet(nn.Module):
         lab_res = improc.lab_to_rgb(self.sigmoid(self.polylayer(img_lab, L)))
         hsv_res = improc.hsv_to_rgb(self.sigmoid(self.polylayer(img_hsv, H)))
         
-        rgb_res = 2 * (rgb_res - 0.5) * mask
-        lab_res = 2 * (lab_res - 0.5) * mask
-        hsv_res = 2 * (hsv_res - 0.5) * mask
+        # Modify all pixels
+        rgb_res = 2 * (rgb_res - 0.5)
+        lab_res = 2 * (lab_res - 0.5)
+        hsv_res = 2 * (hsv_res - 0.5)
         
         final_img = img + rgb_res + lab_res + hsv_res
         
         return final_img
+    
+    def forward(self, img, mask):
+        coeffs = self.backbone(img * mask).reshape(img.shape[0], self.num_spaces, 
+                                                   self.num_channels, self.num_coeffs)
+        
+        R, L, H = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
+        
+        return R, L, H
