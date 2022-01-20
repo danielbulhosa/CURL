@@ -122,7 +122,7 @@ def main():
         inference_data_dict = data.filter_data_dict(data_dict, inference_ids)
         
         inference_dataset = data.Dataset(data_dict=inference_data_dict,
-                                         transform=transforms.Compose([transforms.ToTensor()]), normaliser=1,
+                                         normaliser=1,
                                          is_train=False)
 
         inference_data_loader = torch.utils.data.DataLoader(inference_dataset, batch_size=batch_size, shuffle=False,
@@ -134,7 +134,7 @@ def main():
         logging.info(
             "Performing inference with images in directory: " + inference_img_dirpath)
 
-        net = model.TriSpaceRegNet(polynomial_order=4)
+        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True)
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
         net.load_state_dict(checkpoint['model_state_dict'])
         net.eval()
@@ -164,7 +164,7 @@ def main():
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
                                                              pin_memory=True, num_workers=4)
    
-        net = model.TriSpaceRegNet(polynomial_order=4)
+        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True)
         net.cuda()
         model_parameters = filter(lambda p: p.requires_grad, net.parameters())
         logging.info('######### Network created #########')
@@ -191,9 +191,9 @@ def main():
             loss = checkpoint['loss']
             net.cuda()
         else:
-            optimizer = optim.Adam(net.parameters(), lr=1e-4, betas=(0.9, 0.999), eps=1e-08)
+            optimizer = optim.Adam(net.parameters(), lr=1e-6, betas=(0.5, 0.999))
             
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=5e-4, total_steps=num_epoch, verbose=True)
         best_valid_psnr = 0.0
         optimizer.zero_grad()
         net.train()
@@ -211,13 +211,19 @@ def main():
             batch_pbar = tqdm(enumerate(training_data_loader, 0), total=len(training_data_loader))
 
             for batch_num, data in batch_pbar:
-                input_img_batch, gt_img_batch = data['input_img'].cuda(non_blocking=True), \
-                                                data['output_img'].cuda(non_blocking=True)
+                input_img_batch, gt_img_batch, mask_batch = data['input_img'].cuda(non_blocking=True), \
+                                                            data['output_img'].cuda(non_blocking=True), \
+                                                            data['mask'].cuda(non_blocking=True)
                 
-                net_img_batch = net(input_img_batch)
+                # Regression coeffcients, only regress based on unmasked pixels
+                R, L, H = net(input_img_batch, mask_batch)
+                # Apply regression to channels to ALL pixels
+                net_img_batch = net.generate_image(input_img_batch, 
+                                                   R, L, H)
                 net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
                 
-                loss = criterion(net_img_batch, gt_img_batch)
+                # Calculate loss, leaving out masked pixels
+                loss = criterion(net_img_batch, gt_img_batch, mask_batch)
                 
                 optimizer.zero_grad()
                 loss.backward()
@@ -234,7 +240,7 @@ def main():
             logging.info('[%d] train loss: %.15f' %
                          (epoch + 1, running_loss / batches))
             writer.add_scalar('Loss/train_smooth', running_loss / batches, epoch + 1)
-            scheduler.step(running_loss / batches)
+            scheduler.step()
             
             # Valid loss
             if (epoch + 1) % valid_every == 0:
@@ -242,7 +248,7 @@ def main():
                 logging.info("######### Epoch {}: Validation #########".format(epoch + 1))
 
                 valid_loss, valid_psnr, valid_ssim = validation_evaluator.evaluate(net, epoch)
-
+                
                 logging.info(
                     "Saving checkpoint to file: " + 
                     'curl_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr, valid_loss, epoch))
