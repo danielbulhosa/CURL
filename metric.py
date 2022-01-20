@@ -77,22 +77,27 @@ class Evaluator():
             
             for batch_num, data in batch_pbar:
 
-                input_img_batch, output_img_batch, names = Variable(data['input_img'], requires_grad=False).cuda(non_blocking=True), \
-                                                          Variable(data['output_img'], requires_grad=False).cuda(non_blocking=True), \
-                                                          data['name']
+                input_img_batch, output_img_batch, mask_batch, names = \
+                    Variable(data['input_img'], requires_grad=False).cuda(non_blocking=True), \
+                    Variable(data['output_img'], requires_grad=False).cuda(non_blocking=True), \
+                    Variable(data['mask'], requires_grad=False).cuda(non_blocking=True), \
+                    data['name']
                         
-                input_img_batch = torch.clamp(input_img_batch, 0, 1)
-                net_output_img_batch = net(input_img_batch)
-                loss = self.criterion(net_output_img_batch, output_img_batch)
+                R, L, H = net(input_img_batch, mask_batch)
+                net_output_img_batch = net.generate_image(input_img_batch, 
+                                                          R, L, H)
+                net_output_img_batch = torch.clamp(net_output_img_batch, 0.0, 1.0)
+                
+                loss = self.criterion(net_output_img_batch, output_img_batch, mask_batch)
                 loss_scalar = loss.item()
                 running_loss += loss_scalar
                 examples += input_img_batch.shape[0]
                 batches += 1
-                
-                net_output_img_batch = torch.clamp(net_output_img_batch, 0, 1)
-                
-                psnr_avg = image_processing.compute_psnr(output_img_batch, net_output_img_batch, torch.tensor(1.0)).item()
-                msssim_avg = image_processing.compute_msssim(output_img_batch, net_output_img_batch).mean().item()
+                                
+                psnr_avg = image_processing.compute_psnr(output_img_batch, net_output_img_batch, mask_batch, 
+                                                         torch.tensor(1.0)).item()
+                msssim_avg = image_processing.compute_msssim(output_img_batch * mask_batch, 
+                                                             net_output_img_batch * mask_batch).mean().item()
                 
                 if save_images:
                     self.save_images(net_output_img_batch, names, epoch)
