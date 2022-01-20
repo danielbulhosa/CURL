@@ -158,7 +158,7 @@ def swapimdims_HW3_3HW(img):
         return np.swapaxes(np.swapaxes(img, 1, 3), 2, 3)
 
 
-def load_image(img_filepath, normaliser):
+def load_image(img_filepath, normaliser, mono=False):
     """Loads an image from file as a numpy multi-dimensional array
 
     :param img_filepath: filepath to the image
@@ -166,7 +166,9 @@ def load_image(img_filepath, normaliser):
     :rtype: multi-dimensional numpy array
 
     """
-    img = normalise_image(np.array(Image.open(img_filepath)), normaliser)  # NB: imread normalises to 0-1
+    img = Image.open(img_filepath)
+    img = img.convert('1') if mono else img # Make image b&w
+    img = normalise_image(np.array(img), normaliser)  # NB: imread normalises to 0-1
     return img
 
 
@@ -182,7 +184,7 @@ def normalise_image(img, normaliser):
     return img
 
 
-def compute_mse(original_batch, result_batch):
+def compute_mse(original_batch, result_batch, mask):
     """Computes the mean squared error between to RGB images represented as multi-dimensional numpy arrays.
 
     :param original: input RGB image as a numpy array
@@ -191,12 +193,12 @@ def compute_mse(original_batch, result_batch):
     :rtype: float
 
     """
-    mask = torch.logical_not(torch.logical_and((0 == original_batch).all(dim=1),
-                                       (0 == result_batch).all(dim=1)))
+    original_batch, result_batch = original_batch * mask, result_batch * mask
+    mask = torch.squeeze(mask, dim=1)
     return ((original_batch - result_batch) ** 2).sum(dim=(1,2,3))/mask.sum(dim=(1,2))
 
 
-def compute_psnr(image_batchA, image_batchB, max_intensity=1.0):
+def compute_psnr(image_batchA, image_batchB, mask_batch, max_intensity=1.0):
     """Computes the PSNR for a batch of input and output images
 
     :param image_batchA: numpy nd-array representing the image batch A of shape Bx3xWxH
@@ -210,7 +212,7 @@ def compute_psnr(image_batchA, image_batchB, max_intensity=1.0):
                                  torch.clamp(image_batchB, 0.0, 1.0)
     # Calculate PSNR per image
     psnr_val = 10 * torch.log10(max_intensity ** 2 /
-                                compute_mse(image_batchA, image_batchB))
+                                compute_mse(image_batchA, image_batchB, mask_batch))
 
     # Take average over batch dimension
     return psnr_val.mean()
