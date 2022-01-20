@@ -93,7 +93,7 @@ class CURLLoss(nn.Module):
 
         """
         # Apply mask for purposes of loss function
-        unmasked_pixels = mask.sum()
+        unmasked_pixels = predicted_img_batch.shape[1] * mask.sum()  # Multiply by number of channels
         predicted_img_batch, target_img_batch = predicted_img_batch * mask, target_img_batch * mask
         
         rgb_loss_value = F.l1_loss(predicted_img_batch, target_img_batch, reduction='sum')/unmasked_pixels

@@ -194,8 +194,9 @@ def compute_mse(original_batch, result_batch, mask):
 
     """
     original_batch, result_batch = original_batch * mask, result_batch * mask
-    mask = torch.squeeze(mask, dim=1)
-    return ((original_batch - result_batch) ** 2).sum(dim=(1,2,3))/mask.sum(dim=(1,2))
+    # Multiply number of unmasked pixels by number of channels
+    unmasked_pixels = original_batch.shape[1] * torch.squeeze(mask, dim=1).sum(dim=(1,2))
+    return ((original_batch - result_batch) ** 2).sum(dim=(1,2,3))/unmasked_pixels
 
 
 def compute_psnr(image_batchA, image_batchB, mask_batch, max_intensity=1.0):
