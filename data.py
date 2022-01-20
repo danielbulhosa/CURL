@@ -46,24 +46,29 @@ def get_data_dict(data_dirpath):
     try: 
         input_dir = [directory for directory in data_dirs if 'input' in directory][0]
         output_dir = [directory for directory in data_dirs if 'output' in directory][0]
+        mask_dir = [directory for directory in data_dirs if 'mask' in directory][0]
         logging.info("Using {} as input directory and {} as output directory.".format(input_dir, output_dir))
     except IndexError:
         raise OSError("{} must contain a directories containing the words 'input', 'output' respectively".format(data_dirpath))
 
     full_input_dir = data_dirpath + input_dir + os.path.sep
     full_output_dir = data_dirpath + output_dir + os.path.sep
+    full_mask_dir = data_dirpath + mask_dir + os.path.sep
         
     input_imgs = [filename for filename in sorted(os.listdir(full_input_dir)) if not filename.startswith('.')]
     output_imgs = [filename for filename in sorted(os.listdir(full_output_dir)) if not filename.startswith('.')]
+    masks = [filename for filename in sorted(os.listdir(full_mask_dir)) if not filename.startswith('.')]
     
     assert input_imgs == output_imgs, "Input and output image directories should have the same file names."
+    assert input_imgs == masks, "Input image and mask directories should have the same file names."
     
     idxs = [int(os.path.splitext(filename)[0]) for filename in input_imgs]
     data_dict = {}
     
-    for idx, input_img, output_img in zip(idxs, input_imgs, output_imgs):
+    for idx, input_img, output_img, mask in zip(idxs, input_imgs, output_imgs, masks):
         data_dict[idx] = {'input_img': full_input_dir + input_img, 
-                          'output_img': full_output_dir + output_img}
+                          'output_img': full_output_dir + output_img,
+                          'mask': full_mask_dir + mask}
         
     return data_dict
 
@@ -116,6 +121,27 @@ class Dataset(torch.utils.data.Dataset):
 
         """
         return (len(self.data_dict.keys()))
+    
+    def transform(self, input_img, output_img, mask):
+        # Stacking guarantees the same transform is applied to all images
+        mask = mask.reshape(mask.shape[0], mask.shape[1], 1)
+        in_out_mask_stack = np.concatenate([input_img, output_img, mask], axis=2)
+        
+        if self.normaliser==1:
+            in_out_mask_stack = in_out_mask_stack.astype(np.uint8)
+
+        in_out_mask_stack = TF.to_tensor(in_out_mask_stack)
+        in_out_mask_stack = self.cropper(in_out_mask_stack)
+
+        if self.is_train:
+            for transform in self.transforms:
+                in_out_mask_stack = transform(in_out_mask_stack)
+        
+        
+        input_img, output_img, mask = in_out_mask_stack[:3], \
+                                      in_out_mask_stack[3:6], \
+                                      in_out_mask_stack[6:7]
+        return input_img, output_img, mask
 
     def __getitem__(self, idx):
         """Returns a pair of images with the given identifier. This is lazy loading
@@ -132,16 +158,11 @@ class Dataset(torch.utils.data.Dataset):
             self.data_dict[idx]['input_img'], normaliser=self.normaliser)
         output_img = image_processing.load_image(
             self.data_dict[idx]['output_img'], normaliser=self.normaliser)
+        mask = image_processing.load_image(
+            self.data_dict[idx]['mask'], normaliser=self.normaliser, mono=True)
+        
+        input_img, output_img, mask = self.transform(input_img, output_img, mask)
+        mask = (mask > 0)
 
-        if self.normaliser==1:
-            input_img, output_img = input_img.astype(np.uint8), output_img.astype(np.uint8)
-
-        input_img, output_img = TF.to_tensor(input_img), TF.to_tensor(output_img)
-        input_img, output_img = self.cropper(input_img), self.cropper(output_img)
-
-        if self.is_train:
-            for transform in self.transforms:
-                input_img, output_img = transform(input_img), transform(output_img)
-
-        return {'input_img': input_img, 'output_img': output_img,
+        return {'input_img': input_img, 'output_img': output_img, 'mask': mask,
                 'name': self.data_dict[idx]['input_img'].split("/")[-1]}
