@@ -19,10 +19,12 @@ import torch
 import logging
 from torch.autograd import Variable
 import image_processing
+import transpose
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 np.set_printoptions(threshold=sys.maxsize)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Evaluator():
 
@@ -38,6 +40,8 @@ class Evaluator():
         self.data_loader = data_loader
         self.split_name = split_name
         self.log_dirpath = log_dirpath
+        self.psnr = image_processing.PSNRMetric().to(device)
+        self.msssim = image_processing.MSSSIMMetric().to(device)
         
     def save_images(self, net_output_img_batch, names, epoch):  
         numpy_batch = net_output_img_batch.cpu().numpy()
@@ -52,7 +56,7 @@ class Evaluator():
         for i in range(0, numpy_batch.shape[0]):
             net_output_img_example = (numpy_batch[i] * 255).astype('uint8')
             save_path = epoch_dirpath + names[i]
-            plt.imsave(save_path, image_processing.swapimdims_3HW_HW3(net_output_img_example))
+            plt.imsave(save_path, transpose.swapimdims_3HW_HW3(net_output_img_example))
 
     def evaluate(self, net, epoch=0, save_images=False):
         """Evaluates a network on a specified split of a dataset e.g. test, validation
@@ -66,7 +70,7 @@ class Evaluator():
 
         # switch model to evaluation mode
         net.eval()
-        net.cuda()
+        net.to(device)
 
         with torch.no_grad():
 
@@ -78,14 +82,12 @@ class Evaluator():
             for batch_num, data in batch_pbar:
 
                 input_img_batch, output_img_batch, mask_batch, names = \
-                    Variable(data['input_img'], requires_grad=False).cuda(non_blocking=True), \
-                    Variable(data['output_img'], requires_grad=False).cuda(non_blocking=True), \
-                    Variable(data['mask'], requires_grad=False).cuda(non_blocking=True), \
+                    Variable(data['input_img'], requires_grad=False).to(device, non_blocking=True), \
+                    Variable(data['output_img'], requires_grad=False).to(device, non_blocking=True), \
+                    Variable(data['mask'], requires_grad=False).to(device, non_blocking=True), \
                     data['name']
                         
-                R, L, H = net(input_img_batch, mask_batch)
-                net_output_img_batch = net.generate_image(input_img_batch, 
-                                                          R, L, H)
+                net_output_img_batch = net(input_img_batch, mask_batch)
                 net_output_img_batch = torch.clamp(net_output_img_batch, 0.0, 1.0)
                 
                 loss = self.criterion(net_output_img_batch, output_img_batch, mask_batch)
@@ -94,10 +96,9 @@ class Evaluator():
                 examples += input_img_batch.shape[0]
                 batches += 1
                                 
-                psnr_avg = image_processing.compute_psnr(output_img_batch, net_output_img_batch, mask_batch, 
-                                                         torch.tensor(1.0)).item()
-                msssim_avg = image_processing.compute_msssim(output_img_batch * mask_batch, 
-                                                             net_output_img_batch * mask_batch).mean().item()
+                psnr_avg = self.psnr(output_img_batch, net_output_img_batch, mask_batch).item()
+                msssim_avg = self.msssim(output_img_batch * mask_batch, 
+                                         net_output_img_batch * mask_batch).mean().item()
                 
                 if save_images:
                     self.save_images(net_output_img_batch, names, epoch)

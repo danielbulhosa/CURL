@@ -62,6 +62,7 @@ np.set_printoptions(threshold=sys.maxsize)
 def main():
     import data  # FIXME - import not picked up unless in main scope. Why?
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     writer = SummaryWriter()
 
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -160,15 +161,15 @@ def main():
         validation_dataset = data.Dataset(data_dict=validation_data_dict, normaliser=1, is_train=False)
 
         training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True,
-                                                           pin_memory=True, num_workers=4)
+                                                           pin_memory=True, num_workers=16)
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
-                                                             pin_memory=True, num_workers=4)
+                                                             pin_memory=True, num_workers=16)
    
-        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True)
-        net.cuda()
+        net = torch.nn.DataParallel(model.TriSpaceRegNet(polynomial_order=4, spatial=True)) # Try parallelizing
+        net.to(device)
         model_parameters = filter(lambda p: p.requires_grad, net.parameters())
         logging.info('######### Network created #########')
-        criterion = model.CURLLoss(ssim_window_size=5)
+        criterion = model.CURLLoss(ssim_window_size=5).to(device)
 
         '''
         The following objects allow for evaluation of a model on the validation split of the dataset
@@ -189,11 +190,12 @@ def main():
 
             start_epoch = checkpoint['epoch']
             loss = checkpoint['loss']
-            net.cuda()
+            net.to(device)
         else:
-            optimizer = optim.Adam(net.parameters(), lr=1e-6, betas=(0.5, 0.999))
+            optimizer = optim.Adam(filter(lambda p: p.requires_grad,
+                                      net.parameters()), lr=5e-7, betas=(0.5, 0.999))
             
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=5e-4, total_steps=num_epoch, verbose=True)
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-4, total_steps=num_epoch, verbose=True)
         best_valid_psnr = 0.0
         optimizer.zero_grad()
         net.train()
@@ -211,15 +213,11 @@ def main():
             batch_pbar = tqdm(enumerate(training_data_loader, 0), total=len(training_data_loader))
 
             for batch_num, data in batch_pbar:
-                input_img_batch, gt_img_batch, mask_batch = data['input_img'].cuda(non_blocking=True), \
-                                                            data['output_img'].cuda(non_blocking=True), \
-                                                            data['mask'].cuda(non_blocking=True)
+                input_img_batch, gt_img_batch, mask_batch = data['input_img'].to(device, non_blocking=True), \
+                                                            data['output_img'].to(device, non_blocking=True), \
+                                                            data['mask'].to(device, non_blocking=True)
                 
-                # Regression coeffcients, only regress based on unmasked pixels
-                R, L, H = net(input_img_batch, mask_batch)
-                # Apply regression to channels to ALL pixels
-                net_img_batch = net.generate_image(input_img_batch, 
-                                                   R, L, H)
+                net_img_batch = net(input_img_batch, mask_batch)
                 net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
                 
                 # Calculate loss, leaving out masked pixels
