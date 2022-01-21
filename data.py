@@ -19,7 +19,6 @@ from abc import ABCMeta, abstractmethod
 from collections import defaultdict
 import logging
 import os
-import image_processing
 import torchvision.transforms as trans
 import torchvision.transforms.functional as TF
 import random
@@ -122,6 +121,32 @@ class Dataset(torch.utils.data.Dataset):
         """
         return (len(self.data_dict.keys()))
     
+    @staticmethod
+    def load_image(img_filepath, normaliser, mono=False):
+        """Loads an image from file as a numpy multi-dimensional array
+
+        :param img_filepath: filepath to the image
+        :returns: image as a multi-dimensional numpy array
+        :rtype: multi-dimensional numpy array
+
+        """
+        img = Image.open(img_filepath)
+        img = img.convert('1') if mono else img # Make image b&w
+        img = Dataset.normalise_image(np.array(img), normaliser)  # NB: imread normalises to 0-1
+        return img
+
+    @staticmethod
+    def normalise_image(img, normaliser):
+        """Normalises image data to be a float between 0 and 1
+
+        :param img: Image as a numpy multi-dimensional image array
+        :returns: Normalised image as a numpy multi-dimensional image array
+        :rtype: Numpy array
+
+        """
+        img = img.astype('float32') / normaliser
+        return img
+    
     def transform(self, input_img, output_img, mask):
         # Stacking guarantees the same transform is applied to all images
         mask = mask.reshape(mask.shape[0], mask.shape[1], 1)
@@ -154,11 +179,11 @@ class Dataset(torch.utils.data.Dataset):
 
         """
 
-        input_img = image_processing.load_image(
+        input_img = Dataset.load_image(
             self.data_dict[idx]['input_img'], normaliser=self.normaliser)
-        output_img = image_processing.load_image(
+        output_img = Dataset.load_image(
             self.data_dict[idx]['output_img'], normaliser=self.normaliser)
-        mask = image_processing.load_image(
+        mask = Dataset.load_image(
             self.data_dict[idx]['mask'], normaliser=self.normaliser, mono=True)
         
         input_img, output_img, mask = self.transform(input_img, output_img, mask)
