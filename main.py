@@ -50,7 +50,7 @@ import numpy as np
 import datetime
 import os.path
 import os
-import metric
+import evaluate
 import model
 import sys
 from torchsummary import summary
@@ -142,7 +142,7 @@ def main():
 
         criterion = model.CURLLoss()
 
-        inference_evaluator = metric.Evaluator(
+        inference_evaluator = evaluate.Evaluator(
             criterion, inference_data_loader, "test", log_dirpath)
 
         inference_evaluator.evaluate(net, epoch=0, save_images=True)
@@ -174,7 +174,7 @@ def main():
         '''
         The following objects allow for evaluation of a model on the validation split of the dataset
         '''
-        validation_evaluator = metric.Evaluator(criterion, validation_data_loader, "valid", log_dirpath)
+        validation_evaluator = evaluate.Evaluator(criterion, validation_data_loader, "valid", log_dirpath)
         start_epoch=0
 
         if (checkpoint_filepath is not None) and (inference_img_dirpath is None):
