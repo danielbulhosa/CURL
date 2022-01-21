@@ -18,6 +18,8 @@ import torch
 import torch.nn as nn
 from collections import defaultdict
 import image_processing as improc
+import colors
+import curves
 from torch.autograd import Variable
 import math
 import torch.nn.functional as F
@@ -27,7 +29,7 @@ import timm
 from functools import reduce
 
 np.set_printoptions(threshold=sys.maxsize)
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class CURLLoss(nn.Module):
     
@@ -43,21 +45,12 @@ class CURLLoss(nn.Module):
         super(CURLLoss, self).__init__()
         self.ssim_window_size = ssim_window_size
         self.num_channel = num_channel
-        self.window = improc.create_window(self.ssim_window_size, self.num_channel)
-
-
-    def compute_ssim(self, img1, img2):
-        return improc.compute_ssim(img1, img2, self.window, 
-                                            self.ssim_window_size, self.num_channel)
-
-
-    def compute_msssim(self, img1, img2):
-        return improc.compute_msssim(img1, img2, self.window, 
-                                               self.ssim_window_size, self.num_channel)
+        self.msssim_layer = improc.MSSSIMMetric(num_channel=num_channel)
+        self.rgb2lab = colors.RGB2LAB()
+        self.rgb2hsv = colors.RGB2HSV()
     
-    @staticmethod
-    def batch_lab_convert(img_batch):
-        converted_batch = improc.rgb_to_lab(img_batch)
+    def batch_lab_convert(self, img_batch):
+        converted_batch = self.rgb2lab(img_batch)
         converted_batch = torch.clamp(converted_batch, 0.0, 1.0)
         return converted_batch
     
@@ -65,10 +58,9 @@ class CURLLoss(nn.Module):
     def batch_L_ssim_convert(lab_img_batch):
         return lab_img_batch[:, 0, :, :].unsqueeze(1)
     
-    @staticmethod
-    def batch_hsv_convert(img_batch):
+    def batch_hsv_convert(self, img_batch):
         # Batch calculate HSV values
-        img_batch_hsv = improc.rgb_to_hsv(img_batch)
+        img_batch_hsv = self.rgb2hsv(img_batch)
         img_batch_hsv = torch.clamp(img_batch_hsv, 0.0, 1.0)
                                         
         img_batch_hue = 2*math.pi*img_batch_hsv[:, 0, :, :]
@@ -109,7 +101,7 @@ class CURLLoss(nn.Module):
             
         target_img_batch_L_ssim = self.batch_L_ssim_convert(target_img_batch_lab)
         predicted_img_batch_L_ssim = self.batch_L_ssim_convert(predicted_img_batch_lab)
-        ssim_loss_value = (1.0 - self.compute_msssim(predicted_img_batch_L_ssim , target_img_batch_L_ssim)).mean()
+        ssim_loss_value = (1.0 - self.msssim_layer(predicted_img_batch_L_ssim , target_img_batch_L_ssim)).mean()
         
         target_img_batch_hsv = self.batch_hsv_convert(target_img_batch)
         predicted_img_batch_hsv = self.batch_hsv_convert(predicted_img_batch)
@@ -135,6 +127,11 @@ class CURLLayer(nn.Module):
         self.num_lab_points = num_lab_points
         self.num_rgb_points = num_rgb_points
         self.num_hsv_points = num_hsv_points
+        self.rgb2lab = colors.RGB2LAB()
+        self.lab2rgb = colors.LAB2RGB()
+        self.rgb2hsv = colors.RGB2HSV()
+        self.hsv2rgb = colors.HSV2RGB()
+
 
     def forward(self, img, mask, L, R, H):
         """Forward function for the CURL layer
@@ -150,25 +147,25 @@ class CURLLayer(nn.Module):
         '''        
 
         # RGB -> LAB, modify LAB
-        img_lab = improc.rgb_to_lab(img)
+        img_lab = self.rgb2lab(img)
         feat_lab = torch.cat((feat, img_lab), 1)
-        img_lab, gradient_regulariser_lab = improc.adjust_lab(img_lab, L[:, :self.num_lab_points])
+        img_lab, gradient_regulariser_lab = curves.adjust_lab(img_lab, L[:, :self.num_lab_points])
         img_lab = img_lab * mask
         
         # LAB -> RGB, modify RGB
-        img_rgb = improc.lab_to_rgb(img_lab)
+        img_rgb = self.lab2rgb(img_lab)
         feat_rgb = torch.cat((feat, img_rgb), 1)
-        img_rgb, gradient_regulariser_rgb = improc.adjust_rgb(img_rgb, R[:, :self.num_rgb_points])
+        img_rgb, gradient_regulariser_rgb = curves.adjust_rgb(img_rgb, R[:, :self.num_rgb_points])
         img_rgb = img_rgb * mask
         
         # RGB -> HSV, modify HSV
-        img_hsv = improc.rgb_to_hsv(img_rgb)
+        img_hsv = self.rgb2hsv(img_rgb)
         feat_hsv = torch.cat((feat, img_hsv), 1)
-        img_hsv, gradient_regulariser_hsv = improc.adjust_hsv(img_hsv, H[:, :self.num_hsv_points])
+        img_hsv, gradient_regulariser_hsv = curves.adjust_hsv(img_hsv, H[:, :self.num_hsv_points])
         img_hsv = img_hsv * mask
         
         # HSV -> RGB, calculate residual and final image
-        img_residual = improc.hsv_to_rgb(img_hsv)
+        img_residual = self.hsv2rgb(img_hsv)
         img = torch.clamp(img + img_residual, 0.0, 1.0) * mask
         
         gradient_regulariser = (gradient_regulariser_rgb +
@@ -216,7 +213,8 @@ class ChannelPolyLayer(nn.Module):
         self.num_variables = num_variables
         self.num_out = self.num_variables if num_out is None else num_out
         self.num_coeffs = ChannelPolyLayer.ncr(num_variables + degree, degree)
-        self.powers = torch.Tensor(list(ChannelPolyLayer.generate_powers(degree, num_variables))).cuda()
+        self.powers = nn.Parameter(torch.Tensor(list(ChannelPolyLayer.generate_powers(degree, num_variables))),
+                                   requires_grad=False)
         
         assert self.powers.shape[0] == self.num_coeffs,\
             "Number of coefficients and powers should match"
@@ -337,16 +335,24 @@ class TriSpaceRegNet(nn.Module):
                                                  nn.Linear(in_features=448, out_features=448),
                                                  nn.Linear(in_features=448, out_features=self.num_spaces*self.num_channels*self.num_coeffs)
                                                )
+        self.rgb2lab = colors.RGB2LAB()
+        self.lab2rgb = colors.LAB2RGB()
+        self.rgb2hsv = colors.RGB2HSV()
+        self.hsv2rgb = colors.HSV2RGB()
+        
         self.sigmoid = nn.Sigmoid()
         
         if not spatial:
-            self.x = torch.zeros(minibatch_size, 0, height, width).cuda()
-            self.y = torch.zeros(minibatch_size, 0, height, width).cuda()
+            self.x = torch.zeros(minibatch_size, 0, height, width)
+            self.y = torch.zeros(minibatch_size, 0, height, width)
         else:
             self.x = (torch.arange(0, width)/width).reshape(1, 1, 1, width)\
-                                                   .repeat(minibatch_size, 1, height, 1).cuda()
+                                                   .repeat(minibatch_size, 1, height, 1)
             self.y = (torch.arange(0, height)/height).reshape(1, 1, height, 1)\
-                                                     .repeat(minibatch_size, 1, 1, width).cuda()
+                                                     .repeat(minibatch_size, 1, 1, width)
+            
+        self.x = torch.nn.Parameter(self.x, requires_grad=False)
+        self.y = torch.nn.Parameter(self.y, requires_grad=False)
             
     def cat_coords(self, img):
         """
@@ -356,12 +362,12 @@ class TriSpaceRegNet(nn.Module):
     
     def generate_image(self, img, R, L, H):
         img_rgb = self.cat_coords(img)
-        img_lab = self.cat_coords(improc.rgb_to_lab(img))
-        img_hsv = self.cat_coords(improc.rgb_to_hsv(img))
+        img_lab = self.cat_coords(self.rgb2lab(img))
+        img_hsv = self.cat_coords(self.rgb2hsv(img))
         
         rgb_res = self.sigmoid(self.polylayer(img_rgb, R))
-        lab_res = improc.lab_to_rgb(self.sigmoid(self.polylayer(img_lab, L)))
-        hsv_res = improc.hsv_to_rgb(self.sigmoid(self.polylayer(img_hsv, H)))
+        lab_res = self.lab2rgb(self.sigmoid(self.polylayer(img_lab, L)))
+        hsv_res = self.hsv2rgb(self.sigmoid(self.polylayer(img_hsv, H)))
         
         # Modify all pixels
         rgb_res = 2 * (rgb_res - 0.5)
@@ -372,10 +378,16 @@ class TriSpaceRegNet(nn.Module):
         
         return final_img
     
-    def forward(self, img, mask):
+    def generate_coefficients(self, img, mask):
         coeffs = self.backbone(img * mask).reshape(img.shape[0], self.num_spaces, 
                                                    self.num_channels, self.num_coeffs)
         
         R, L, H = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
-        
         return R, L, H
+    
+    def forward(self, img, mask):
+        
+        R, L, H = self.generate_coefficients(img, mask)
+        final_img = self.generate_image(img, R, L, H)
+        
+        return final_img
