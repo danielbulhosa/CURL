@@ -28,7 +28,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Evaluator():
 
-    def __init__(self, criterion, data_loader, split_name, log_dirpath):
+    def __init__(self, criterion, data_loader, split_name, log_dirpath, mixed_precision):
         """Initialisation function for the data loader
         :param data_dirpath: directory containing the data
         :param img_ids_filepath: file containing the ids of the images to load
@@ -42,6 +42,7 @@ class Evaluator():
         self.log_dirpath = log_dirpath
         self.psnr = metric.PSNRMetric().to(device)
         self.msssim = metric.MSSSIMMetric().to(device)
+        self.mixed_precision = mixed_precision
         
     def save_images(self, net_output_img_batch, names, epoch):  
         numpy_batch = net_output_img_batch.cpu().numpy()
@@ -86,19 +87,22 @@ class Evaluator():
                     Variable(data['output_img'], requires_grad=False).to(device, non_blocking=True), \
                     Variable(data['mask'], requires_grad=False).to(device, non_blocking=True), \
                     data['name']
-                        
-                net_output_img_batch = net(input_img_batch, mask_batch)
-                net_output_img_batch = torch.clamp(net_output_img_batch, 0.0, 1.0)
                 
-                loss = self.criterion(net_output_img_batch, output_img_batch, mask_batch)
+                with torch.cuda.amp.autocast(enabled=self.mixed_precision):
+                    net_output_img_batch = net(input_img_batch, mask_batch)
+                    net_output_img_batch = torch.clamp(net_output_img_batch, 0.0, 1.0)
+                    loss = self.criterion(net_output_img_batch, output_img_batch, mask_batch)
+                    psnr = self.psnr(output_img_batch, net_output_img_batch, mask_batch)
+                    msssim = self.msssim(output_img_batch * mask_batch, 
+                                         net_output_img_batch * mask_batch).mean()
+                
                 loss_scalar = loss.item()
                 running_loss += loss_scalar
                 examples += input_img_batch.shape[0]
                 batches += 1
                                 
-                psnr_avg = self.psnr(output_img_batch, net_output_img_batch, mask_batch).item()
-                msssim_avg = self.msssim(output_img_batch * mask_batch, 
-                                         net_output_img_batch * mask_batch).mean().item()
+                psnr_avg = psnr.item()
+                msssim_avg = msssim.item()
                 
                 if save_images:
                     self.save_images(net_output_img_batch, names, epoch)

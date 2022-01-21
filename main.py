@@ -91,6 +91,7 @@ def main():
         "--training_img_dirpath", required=False,
         help="Directory containing images to train a DeepLPF model instance", default="/home/sjm213/adobe5k/adobe5k/")
     parser.add_argument("--batch_size", type=int, required=False,help="Batch size", default=1)
+    parser.add_argument("--mixed_precision", type=bool, required=False, help="Batch size", default=False)
 
     args = parser.parse_args()
     num_epoch = args.num_epoch
@@ -99,6 +100,7 @@ def main():
     inference_img_dirpath = args.inference_img_dirpath
     training_img_dirpath = args.training_img_dirpath
     batch_size = args.batch_size
+    mixed_precision = args.mixed_precision
 
     logging.info('######### Parameters #########')
     logging.info('Number of epochs: ' + str(num_epoch))
@@ -135,7 +137,9 @@ def main():
         logging.info(
             "Performing inference with images in directory: " + inference_img_dirpath)
 
-        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True)
+        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
+                                   minibatch_size=batch_size,
+                                   mixed_precision=mixed_precision)
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
         net.load_state_dict(checkpoint['model_state_dict'])
         net.eval()
@@ -143,7 +147,7 @@ def main():
         criterion = model.CURLLoss()
 
         inference_evaluator = evaluate.Evaluator(
-            criterion, inference_data_loader, "test", log_dirpath)
+            criterion, inference_data_loader, "test", log_dirpath, mixed_precision=mixed_precision)
 
         inference_evaluator.evaluate(net, epoch=0, save_images=True)
 
@@ -165,7 +169,9 @@ def main():
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
                                                              pin_memory=True, num_workers=16)
    
-        net = torch.nn.DataParallel(model.TriSpaceRegNet(polynomial_order=4, spatial=True)) # Try parallelizing
+        net = torch.nn.DataParallel(model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
+                                                         minibatch_size=batch_size, 
+                                                         mixed_precision=mixed_precision))
         net.to(device)
         model_parameters = filter(lambda p: p.requires_grad, net.parameters())
         logging.info('######### Network created #########')
@@ -174,7 +180,8 @@ def main():
         '''
         The following objects allow for evaluation of a model on the validation split of the dataset
         '''
-        validation_evaluator = evaluate.Evaluator(criterion, validation_data_loader, "valid", log_dirpath)
+        validation_evaluator = evaluate.Evaluator(criterion, validation_data_loader, "valid", log_dirpath,
+                                                  mixed_precision=mixed_precision)
         start_epoch=0
 
         if (checkpoint_filepath is not None) and (inference_img_dirpath is None):
@@ -199,6 +206,7 @@ def main():
         best_valid_psnr = 0.0
         optimizer.zero_grad()
         net.train()
+        scaler = torch.cuda.amp.GradScaler(enabled=mixed_precision)
 
         for epoch in range(start_epoch, num_epoch):
             
@@ -217,15 +225,18 @@ def main():
                                                             data['output_img'].to(device, non_blocking=True), \
                                                             data['mask'].to(device, non_blocking=True)
                 
-                net_img_batch = net(input_img_batch, mask_batch)
-                net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
-                
-                # Calculate loss, leaving out masked pixels
-                loss = criterion(net_img_batch, gt_img_batch, mask_batch)
-                
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                
+                # See: https://pytorch.org/docs/stable/notes/amp_examples.html#dataparallel-in-a-single-process
+                with torch.cuda.amp.autocast(enabled=mixed_precision):
+                    net_img_batch = net(input_img_batch, mask_batch)
+                    net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
+                    # Calculate loss, leaving out masked pixels
+                    loss = criterion(net_img_batch, gt_img_batch, mask_batch)
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 loss_scalar = loss.data.item()
                 running_loss += loss_scalar
