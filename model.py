@@ -17,7 +17,7 @@ import sys
 import torch
 import torch.nn as nn
 from collections import defaultdict
-import image_processing as improc
+import metric
 import colors
 import curves
 from torch.autograd import Variable
@@ -45,7 +45,7 @@ class CURLLoss(nn.Module):
         super(CURLLoss, self).__init__()
         self.ssim_window_size = ssim_window_size
         self.num_channel = num_channel
-        self.msssim_layer = improc.MSSSIMMetric(num_channel=num_channel)
+        self.msssim_layer = metric.MSSSIMMetric(num_channel=num_channel)
         self.rgb2lab = colors.RGB2LAB()
         self.rgb2hsv = colors.RGB2HSV()
     

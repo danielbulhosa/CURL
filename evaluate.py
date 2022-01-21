@@ -18,7 +18,7 @@ import os
 import torch
 import logging
 from torch.autograd import Variable
-import image_processing
+import metric
 import transpose
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -40,8 +40,8 @@ class Evaluator():
         self.data_loader = data_loader
         self.split_name = split_name
         self.log_dirpath = log_dirpath
-        self.psnr = image_processing.PSNRMetric().to(device)
-        self.msssim = image_processing.MSSSIMMetric().to(device)
+        self.psnr = metric.PSNRMetric().to(device)
+        self.msssim = metric.MSSSIMMetric().to(device)
         
     def save_images(self, net_output_img_batch, names, epoch):  
         numpy_batch = net_output_img_batch.cpu().numpy()
