@@ -29,6 +29,7 @@ class PSNRMetric(nn.Module):
     
     def __init__(self, max_intensity=1.0):
         super(PSNRMetric, self).__init__()
+        self.max_intensity = max_intensity
 
     @staticmethod
     def compute_mse(original_batch, result_batch, mask):
