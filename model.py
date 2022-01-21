@@ -386,8 +386,9 @@ class TriSpaceRegNet(nn.Module):
         return R, L, H
     
     def forward(self, img, mask):
-        
-        R, L, H = self.generate_coefficients(img, mask)
-        final_img = self.generate_image(img, R, L, H)
-        
-        return final_img
+        # See: https://pytorch.org/docs/stable/notes/amp_examples.html#dataparallel-in-a-single-process
+        with torch.cuda.amp.autocast():
+            R, L, H = self.generate_coefficients(img, mask)
+            final_img = self.generate_image(img, R, L, H)
+
+            return final_img
