@@ -137,14 +137,14 @@ def main():
         logging.info(
             "Performing inference with images in directory: " + inference_img_dirpath)
 
-        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
-                                   minibatch_size=batch_size,
-                                   mixed_precision=mixed_precision)
+        net = torch.nn.DataParallel(model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
+                                                         mixed_precision=mixed_precision))
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
         net.load_state_dict(checkpoint['model_state_dict'])
+        net.to(device)
         net.eval()
 
-        criterion = model.CURLLoss()
+        criterion = model.CURLLoss().to(device)
 
         inference_evaluator = evaluate.Evaluator(
             criterion, inference_data_loader, "test", log_dirpath, mixed_precision=mixed_precision)
@@ -170,7 +170,6 @@ def main():
                                                              pin_memory=True, num_workers=16)
    
         net = torch.nn.DataParallel(model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
-                                                         minibatch_size=batch_size, 
                                                          mixed_precision=mixed_precision))
         net.to(device)
         model_parameters = filter(lambda p: p.requires_grad, net.parameters())
