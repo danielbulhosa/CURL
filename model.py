@@ -24,6 +24,7 @@ from torch.autograd import Variable
 import math
 import torch.nn.functional as F
 from torchvision import models
+import torchvision.transforms as trans
 import operator as op
 import timm
 from functools import reduce
@@ -316,12 +317,19 @@ class PolyRegNet(nn.Module):
 class TriSpaceRegNet(nn.Module):
     
     def __init__(self, polynomial_order=4, spatial=False, 
-                 height=256, width=256, minibatch_size=16):
+                 train_height=256, train_width=256,
+                 max_resolution=10000,
+                 mixed_precision=False, is_train=True):
         super(TriSpaceRegNet, self).__init__()
         self.num_channels = 3
         self.num_spaces = 3
         self.num_in = self.num_channels + 2 * spatial
         self.order = polynomial_order
+        self.mixed_precision = mixed_precision
+        self.is_train = is_train
+        self.train_height = train_height
+        self.train_width = train_width
+        self.max_resolution = max_resolution
         self.polylayer = ChannelPolyLayer(degree=self.order, 
                                           num_variables=self.num_in,
                                           num_out=self.num_channels)
@@ -342,23 +350,42 @@ class TriSpaceRegNet(nn.Module):
         
         self.sigmoid = nn.Sigmoid()
         
+        # We found that making the properties parameter values conditional agrees with
+        # DataParallel, but if we rely on pointing methods instead of objects DataParallel
+        # doesn't like that when the method uses parameters.
         if not spatial:
-            self.x = torch.zeros(minibatch_size, 0, height, width)
-            self.y = torch.zeros(minibatch_size, 0, height, width)
+            self.x = torch.zeros(1, 0, 1, self.max_resolution)
+            self.y = torch.zeros(1, 0, self.max_resolution, 1)
         else:
-            self.x = (torch.arange(0, width)/width).reshape(1, 1, 1, width)\
-                                                   .repeat(minibatch_size, 1, height, 1)
-            self.y = (torch.arange(0, height)/height).reshape(1, 1, height, 1)\
-                                                     .repeat(minibatch_size, 1, 1, width)
+            self.x = torch.arange(0, self.max_resolution).reshape(1, 1, 1, self.max_resolution)
+            self.y = torch.arange(0, self.max_resolution).reshape(1, 1, self.max_resolution, 1)
             
         self.x = torch.nn.Parameter(self.x, requires_grad=False)
         self.y = torch.nn.Parameter(self.y, requires_grad=False)
+        
+        # Downsamples images at inference, which may be fuller resolution images.
+        # These methods don't have parameters so DataParallel doesn't care...
+        # ¯\_(ツ)_/¯
+        self.transform = self.check_size if self.is_train else trans.CenterCrop((self.train_height, self.train_width))
             
+    def check_size(self, img):
+        assert img.shape[-1] == self.train_width and img.shape[-2] == self.train_height, \
+            "Input image dims for training should be ( , )".format(self.train_width, self.train_height)
+        
+        return img
+
     def cat_coords(self, img):
         """
-        Concatenates coordinate values to channel dimension
+        Concatenates actual coordinate values to channel dimension
         """
-        return torch.cat([img, self.x[:img.shape[0]], self.y[:img.shape[0]]], dim=1)
+        batch_size, channels, height, width = img.shape
+        assert height <= self.max_resolution and width <= self.max_resolution, \
+            "img width and height must be less than `max_resolution`, set for instance to: {}".format(self.max_resolution)
+        
+        zeros = img[:, 0:1] * 0.0
+        x = zeros  + self.x[:, :, :, :width]/width
+        y = zeros  + self.y[:, :, :height, :]/height
+        return torch.cat([img, x, y], dim=1)
     
     def generate_image(self, img, R, L, H):
         img_rgb = self.cat_coords(img)
@@ -387,8 +414,10 @@ class TriSpaceRegNet(nn.Module):
     
     def forward(self, img, mask):
         # See: https://pytorch.org/docs/stable/notes/amp_examples.html#dataparallel-in-a-single-process
-        with torch.cuda.amp.autocast():
-            R, L, H = self.generate_coefficients(img, mask)
+        with torch.cuda.amp.autocast(enabled=self.mixed_precision):
+            img_trans = self.transform(img)
+            mask_trans = self.transform(mask)
+            R, L, H = self.generate_coefficients(img_trans, mask_trans)
             final_img = self.generate_image(img, R, L, H)
 
             return final_img
