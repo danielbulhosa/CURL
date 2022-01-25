@@ -107,8 +107,8 @@ class Evaluator():
                 examples += input_img_batch.shape[0]
                 batches += 1
                                 
-                psnr_avg = psnr.item()
-                msssim_avg = msssim.item()
+                psnr_avg += psnr.item()
+                msssim_avg += msssim.item()
                 
                 if save_images:
                     self.save_images(net_output_img_batch, names, epoch)
@@ -124,7 +124,7 @@ class Evaluator():
         if self.local_rank == 0:
             logging.info('loss_%s: %.5f psnr_%s: %.3f msssim_%s: %.3f' % (
                 self.split_name, sum(losses) / sum(running_batches), self.split_name, 
-                sum(running_psnr)/world_size, self.split_name, 
-                sum(running_msssim)/world_size))
+                sum(running_psnr)/ sum(running_batches), self.split_name, 
+                sum(running_msssim)/ sum(running_batches)))
 
-        return sum(losses) / sum(running_batches), sum(running_psnr)/world_size, sum(running_msssim)/world_size
+        return sum(losses) / sum(running_batches), sum(running_psnr)/sum(running_batches), sum(running_msssim)/sum(running_batches)
