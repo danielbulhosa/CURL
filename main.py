@@ -56,23 +56,16 @@ import sys
 from torchsummary import summary
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data.distributed import DistributedSampler
+from torch.distributed.elastic.multiprocessing.errors import record
+
+
 
 np.set_printoptions(threshold=sys.maxsize)
 
+@record
 def main():
     import data  # FIXME - import not picked up unless in main scope. Why?
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    writer = SummaryWriter()
-
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    log_dirpath = "./log_" + timestamp
-    os.mkdir(log_dirpath)
-
-    handlers = [logging.FileHandler(
-        log_dirpath + "/curl.log"), logging.StreamHandler()]
-    logging.basicConfig(
-        level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', handlers=handlers)
 
     parser = argparse.ArgumentParser(
         description="Train the CURL neural network on image pairs")
@@ -92,8 +85,10 @@ def main():
         help="Directory containing images to train a DeepLPF model instance", default="/home/sjm213/adobe5k/adobe5k/")
     parser.add_argument("--batch_size", type=int, required=False,help="Batch size", default=1)
     parser.add_argument("--mixed_precision", type=bool, required=False, help="Batch size", default=False)
+    parser.add_argument("--local_rank", type=int, required=False, default=0)
 
     args = parser.parse_args()
+    
     num_epoch = args.num_epoch
     valid_every = args.valid_every
     checkpoint_filepath = args.checkpoint_filepath
@@ -101,13 +96,36 @@ def main():
     training_img_dirpath = args.training_img_dirpath
     batch_size = args.batch_size
     mixed_precision = args.mixed_precision
+    local_rank = args.local_rank
+    
+    # Secret parallelization sauce: https://medium.com/codex/distributed-training-on-multiple-gpus-e0ee9c3d0126
+    torch.distributed.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
 
-    logging.info('######### Parameters #########')
-    logging.info('Number of epochs: ' + str(num_epoch))
-    logging.info('Logging directory: ' + str(log_dirpath))
-    logging.info('Dump validation accuracy every: ' + str(valid_every))
-    logging.info('Training image directory: ' + str(training_img_dirpath))
-    logging.info('##############################')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    writer = SummaryWriter()
+
+    if local_rank == 0:
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        log_dirpath = "./log_" + timestamp
+        os.mkdir(log_dirpath)
+        handlers = [logging.FileHandler(
+            log_dirpath + "/curl.log"), logging.StreamHandler()]
+    else:
+        log_dirpath = None
+        handlers = [logging.StreamHandler()]
+    
+    logging.basicConfig(
+        level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', handlers=handlers)
+
+    if local_rank == 0:
+        logging.info('######### Parameters #########')
+        logging.info('Number of epochs: ' + str(num_epoch))
+        logging.info('Logging directory: ' + str(log_dirpath))
+        logging.info('Dump validation accuracy every: ' + str(valid_every))
+        logging.info('Training image directory: ' + str(training_img_dirpath))
+        logging.info('##############################')
     
     if (checkpoint_filepath is not None) and (inference_img_dirpath is not None):
 
@@ -137,18 +155,18 @@ def main():
         logging.info(
             "Performing inference with images in directory: " + inference_img_dirpath)
 
-        net = torch.nn.DataParallel(model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
-                                                         mixed_precision=mixed_precision))
+        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
+                                                         mixed_precision=mixed_precision)
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
         net.load_state_dict(checkpoint['model_state_dict'])
         net.to(device)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank)
         net.eval()
 
         criterion = model.CURLLoss().to(device)
 
-        inference_evaluator = evaluate.Evaluator(
-            criterion, inference_data_loader, "test", log_dirpath, mixed_precision=mixed_precision)
-
+        inference_evaluator = evaluate.Evaluator(criterion, inference_data_loader, "test", log_dirpath, 
+                                                 mixed_precision=mixed_precision, local_rank=local_rank)
         inference_evaluator.evaluate(net, epoch=0, save_images=True)
 
     else:
@@ -164,14 +182,15 @@ def main():
         training_dataset = data.Dataset(data_dict=training_data_dict, normaliser=1, is_train=True)
         validation_dataset = data.Dataset(data_dict=validation_data_dict, normaliser=1, is_train=False)
 
-        training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=True,
-                                                           pin_memory=True, num_workers=16)
+        training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=False,
+                                                           pin_memory=True, num_workers=11, sampler=DistributedSampler(training_dataset))
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
-                                                             pin_memory=True, num_workers=16)
+                                                             pin_memory=True, num_workers=11, sampler=DistributedSampler(validation_dataset))
    
-        net = torch.nn.DataParallel(model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
-                                                         mixed_precision=mixed_precision))
+        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
+                                                         mixed_precision=mixed_precision)
         net.to(device)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank)
         model_parameters = filter(lambda p: p.requires_grad, net.parameters())
         logging.info('######### Network created #########')
         criterion = model.CURLLoss(ssim_window_size=5).to(device)
@@ -180,7 +199,7 @@ def main():
         The following objects allow for evaluation of a model on the validation split of the dataset
         '''
         validation_evaluator = evaluate.Evaluator(criterion, validation_data_loader, "valid", log_dirpath,
-                                                  mixed_precision=mixed_precision)
+                                                  mixed_precision=mixed_precision, local_rank=local_rank)
         start_epoch=0
 
         if (checkpoint_filepath is not None) and (inference_img_dirpath is None):
@@ -199,9 +218,9 @@ def main():
             net.to(device)
         else:
             optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      net.parameters()), lr=5e-7, betas=(0.5, 0.999))
+                                      net.parameters()), lr=4e-6, betas=(0.5, 0.999))
             
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-4, total_steps=num_epoch, verbose=True)
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=8e-4, total_steps=num_epoch, verbose=True)
         best_valid_psnr = 0.0
         optimizer.zero_grad()
         net.train()
@@ -217,7 +236,8 @@ def main():
             running_loss = 0.0
             batches = 0.0
             
-            batch_pbar = tqdm(enumerate(training_data_loader, 0), total=len(training_data_loader))
+            batch_pbar = tqdm(enumerate(training_data_loader, 0), total=len(training_data_loader),
+                             disable=(local_rank != 0))
 
             for batch_num, data in batch_pbar:
                 input_img_batch, gt_img_batch, mask_batch = data['input_img'].to(device, non_blocking=True), \
@@ -242,12 +262,14 @@ def main():
                 examples += batch_size
                 batches += 1
                 
-                writer.add_scalar('Loss/train', loss_scalar, examples)
-                batch_pbar.set_description('Epoch {}. Train Loss: {}'.format(epoch, loss_scalar))
+                if local_rank == 0:
+                    writer.add_scalar('Loss/train', loss_scalar, examples)
+                    batch_pbar.set_description('Epoch {}. Train Loss: {}'.format(epoch, loss_scalar))
 
             logging.info('[%d] train loss: %.15f' %
                          (epoch + 1, running_loss / batches))
-            writer.add_scalar('Loss/train_smooth', running_loss / batches, epoch + 1)
+            if local_rank == 0:
+                writer.add_scalar('Loss/train_smooth', running_loss / batches, epoch + 1)
             scheduler.step()
             
             # Valid loss
@@ -257,26 +279,25 @@ def main():
 
                 valid_loss, valid_psnr, valid_ssim = validation_evaluator.evaluate(net, epoch)
                 
-                logging.info(
-                    "Saving checkpoint to file: " + 
-                    'curl_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr, valid_loss, epoch))
+                
+                if local_rank == 0:
+                    logging.info(
+                        "Saving checkpoint to file: " + 
+                        'curl_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr, valid_loss, epoch))
 
-                best_valid_psnr = valid_psnr
-                snapshot_prefix = os.path.join(
-                    log_dirpath, 'curl')
-                snapshot_path = snapshot_prefix + '_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr,
-                                                                                                        valid_loss,
-                                                                                                        epoch + 1)
-                '''
-                torch.save(net, snapshot_path)
-                '''
+                    best_valid_psnr = valid_psnr
+                    snapshot_prefix = os.path.join(
+                        log_dirpath, 'curl')
+                    snapshot_path = snapshot_prefix + '_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr,
+                                                                                                            valid_loss,
+                                                                                                            epoch + 1)
 
-                torch.save({
-                    'epoch': epoch+1,
-                     'model_state_dict': net.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                     'loss': valid_loss,
-                     }, snapshot_path)
+                    torch.save({
+                         'epoch': epoch+1,
+                         'model_state_dict': net.state_dict(),
+                         'optimizer_state_dict': optimizer.state_dict(),
+                         'loss': valid_loss,
+                         }, snapshot_path)
 
                 net.train()
 
