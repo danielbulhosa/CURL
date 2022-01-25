@@ -218,9 +218,10 @@ def main():
             net.to(device)
         else:
             optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      net.parameters()), lr=4e-6, betas=(0.5, 0.999))
+                                      net.parameters()), lr=5e-7, betas=(0.5, 0.999))
             
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=8e-4, total_steps=num_epoch, verbose=True)
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-4, total_steps=num_epoch, 
+                                                  verbose=(local_rank == 0))
         best_valid_psnr = 0.0
         optimizer.zero_grad()
         net.train()
@@ -228,8 +229,9 @@ def main():
 
         for epoch in range(start_epoch, num_epoch):
             
-            logging.info("######### Epoch {}: Train #########".format(epoch + 1))
-            logging.info('Learning rate: {}'.format(optimizer.param_groups[0]['lr']))
+            if local_rank == 0:
+                logging.info("######### Epoch {}: Train #########".format(epoch + 1))
+                logging.info('Learning rate: {}'.format(optimizer.param_groups[0]['lr']))
 
             # train loss
             examples = 0.0
@@ -266,21 +268,25 @@ def main():
                     writer.add_scalar('Loss/train', loss_scalar, examples)
                     batch_pbar.set_description('Epoch {}. Train Loss: {}'.format(epoch, loss_scalar))
 
-            logging.info('[%d] train loss: %.15f' %
-                         (epoch + 1, running_loss / batches))
+            world_size = torch.distributed.get_world_size()
+            losses, running_batches = world_size * [None], world_size * [None] 
+            torch.distributed.all_gather_object(losses, running_loss), torch.distributed.all_gather_object(running_batches, batches)
+            
             if local_rank == 0:
-                writer.add_scalar('Loss/train_smooth', running_loss / batches, epoch + 1)
+                logging.info('[%d] train loss: %.15f' %
+                         (epoch + 1, sum(losses) / sum(running_batches)))
+                writer.add_scalar('Loss/train_smooth', sum(losses) / sum(running_batches), epoch + 1)
+                
             scheduler.step()
             
             # Valid loss
             if (epoch + 1) % valid_every == 0:
                 net.eval()
-                logging.info("######### Epoch {}: Validation #########".format(epoch + 1))
-
                 valid_loss, valid_psnr, valid_ssim = validation_evaluator.evaluate(net, epoch)
                 
                 
                 if local_rank == 0:
+                    logging.info("######### Epoch {}: Validation #########".format(epoch + 1))
                     logging.info(
                         "Saving checkpoint to file: " + 
                         'curl_validpsnr_{}_validloss_{}_epoch_{}_model.pt'.format(valid_psnr, valid_loss, epoch))
