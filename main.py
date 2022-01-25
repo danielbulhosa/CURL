@@ -227,7 +227,13 @@ def main():
         net.train()
         scaler = torch.cuda.amp.GradScaler(enabled=mixed_precision)
 
+        if local_rank == 0:
+            print(net)
+        
         for epoch in range(start_epoch, num_epoch):
+            # Required to reshuffle data correctly... 
+            # See end of: https://pytorch.org/docs/stable/data.html#memory-pinning
+            training_data_loader.sampler.set_epoch(epoch)
             
             if local_rank == 0:
                 logging.info("######### Epoch {}: Train #########".format(epoch + 1))
