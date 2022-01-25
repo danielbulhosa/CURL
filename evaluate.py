@@ -116,7 +116,15 @@ class Evaluator():
                 if self.local_rank == 0:
                     batch_pbar.set_description('Epoch {}. Loss: {}'.format(epoch, loss_scalar))
 
-        logging.info('loss_%s: %.5f psnr_%s: %.3f msssim_%s: %.3f' % (
-            self.split_name, running_loss / batches, self.split_name, psnr_avg, self.split_name, msssim_avg))
+        world_size = torch.distributed.get_world_size()
+        losses, running_batches, running_psnr, running_msssim = world_size * [None], world_size * [None], world_size * [None], world_size * [None] 
+        torch.distributed.all_gather_object(losses, running_loss), torch.distributed.all_gather_object(running_batches, batches)
+        torch.distributed.all_gather_object(running_psnr, psnr_avg), torch.distributed.all_gather_object(running_msssim, msssim_avg)
+                    
+        if self.local_rank == 0:
+            logging.info('loss_%s: %.5f psnr_%s: %.3f msssim_%s: %.3f' % (
+                self.split_name, sum(losses) / sum(running_batches), self.split_name, 
+                sum(running_psnr)/world_size, self.split_name, 
+                sum(running_msssim)/world_size))
 
-        return running_loss / batches, psnr_avg, msssim_avg
+        return sum(losses) / sum(running_batches), sum(running_psnr)/world_size, sum(running_msssim)/world_size
