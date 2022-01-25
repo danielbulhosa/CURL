@@ -336,6 +336,8 @@ class TriSpaceRegNet(nn.Module):
         self.num_coeffs = self.polylayer.num_coeffs
         
         self.backbone = timm.create_model('efficientnetv2_rw_s', pretrained=True)
+        if torch.distributed.get_world_size() > 1:
+            self.backbone = nn.SyncBatchNorm.convert_sync_batchnorm(self.backbone)
         self.backbone.classifier = nn.Sequential(nn.Linear(in_features=1792, out_features=1792), # 1280 in for b0
                                                  nn.Linear(in_features=1792, out_features=896),  
                                                  nn.Linear(in_features=896, out_features=896),
