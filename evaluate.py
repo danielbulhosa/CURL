@@ -45,6 +45,9 @@ class Evaluator():
         self.msssim = metric.MSSSIMMetric().to(device)
         self.mixed_precision = mixed_precision
         self.local_rank = local_rank
+        self.is_distributed = torch.distributed.is_initialized()
+        self.world_size = 1 if not self.is_distributed else \
+                            torch.distributed.get_world_size()
         
     def save_images(self, net_output_img_batch, names, epoch):
         if self.local_rank != 0:
@@ -119,14 +122,17 @@ class Evaluator():
                 
                 if self.local_rank == 0:
                     batch_pbar.set_description('Epoch {}. Loss: {}'.format(epoch, loss_scalar))
-
-        world_size = torch.distributed.get_world_size()
-        losses, running_batches, running_pbatches, running_psnr, running_msssim = world_size * [None], world_size * [None], world_size * [None], \
-                                                                                  world_size * [None],  world_size * [None] 
-        torch.distributed.all_gather_object(losses, running_loss), torch.distributed.all_gather_object(running_batches, batches)
-        torch.distributed.all_gather_object(running_pbatches, psnr_batches), torch.distributed.all_gather_object(running_psnr, psnr_avg) 
-        torch.distributed.all_gather_object(running_msssim, msssim_avg)
         
+        losses, running_batches, running_pbatches, running_psnr, running_msssim = self.world_size * [None], self.world_size * [None], self.world_size * [None], \
+                                                                                  self.world_size * [None],  self.world_size * [None]
+        
+        if self.is_distributed:
+            torch.distributed.all_gather_object(losses, running_loss), torch.distributed.all_gather_object(running_batches, batches)
+            torch.distributed.all_gather_object(running_pbatches, psnr_batches), torch.distributed.all_gather_object(running_psnr, psnr_avg) 
+            torch.distributed.all_gather_object(running_msssim, msssim_avg)
+        else:
+            losses[0], running_batches[0], running_pbatches[0], running_psnr[0], running_msssim[0] = \
+                running_loss, batches, psnr_batches, psnr_avg, msssim_avg
                     
         if self.local_rank == 0:
             logging.info('loss_%s: %.5f psnr_%s: %.3f msssim_%s: %.3f' % (

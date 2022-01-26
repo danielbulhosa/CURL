@@ -58,8 +58,12 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.elastic.multiprocessing.errors import record
+import torch.multiprocessing
 
-
+# Resolves https://github.com/pytorch/pytorch/issues/67864
+# Also see: https://github.com/facebookresearch/maskrcnn-benchmark/issues/103
+# Without it, DP training crashes at arbitrary number of epochs
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 np.set_printoptions(threshold=sys.maxsize)
 
@@ -85,25 +89,30 @@ def main():
         help="Directory containing images to train a DeepLPF model instance", default="/home/sjm213/adobe5k/adobe5k/")
     parser.add_argument("--batch_size", type=int, required=False, help="Batch size per gpu", default=32)
     parser.add_argument("--num_workers", type=int, required=False, help="Number of workers per gpu", default=11)
-    parser.add_argument("--parallel_mode", type=str, required=False, help="ddp or dp", default='dp', choices=['dp', 'ddp'])
+    parser.add_argument("--parallel_mode", type=str, required=False, help="ddp or dp, defaults to None (not parallelized)", default=None, choices=['dp', 'ddp'])
     parser.add_argument("--mixed_precision", type=bool, required=False, help="Batch size", default=False)
     parser.add_argument("--local_rank", type=int, required=False, default=0)
 
     args = parser.parse_args()
     
     # Secret parallelization sauce: https://medium.com/codex/distributed-training-on-multiple-gpus-e0ee9c3d0126
-    torch.distributed.init_process_group(backend="nccl")
-    world_size = torch.distributed.get_world_size()
-    device_count = torch.cuda.device_count()
+    parallel_mode = args.parallel_mode
+
+    if parallel_mode == 'ddp':
+        torch.distributed.init_process_group(backend="nccl")
+        world_size = torch.distributed.get_world_size()
+    else:
+        world_size = 1
+    
+    device_count = 1 if parallel_mode is None else torch.cuda.device_count() 
     
     num_epoch = args.num_epoch
     valid_every = args.valid_every
     checkpoint_filepath = args.checkpoint_filepath
     inference_img_dirpath = args.inference_img_dirpath
     training_img_dirpath = args.training_img_dirpath
-    batch_size = int((args.batch_size  * device_count) / world_size)
-    num_workers = int((args.num_workers * device_count) / world_size)
-    parallel_mode = args.parallel_mode
+    batch_size = int(args.batch_size  * device_count / world_size)
+    num_workers = int(args.num_workers * device_count / world_size)
     mixed_precision = args.mixed_precision
     local_rank = args.local_rank
     
@@ -164,14 +173,14 @@ def main():
             "Performing inference with images in directory: " + inference_img_dirpath)
 
         net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
-                                                         mixed_precision=mixed_precision)
+                                   mixed_precision=mixed_precision, use_sync_bn=(parallel_mode == 'ddp'))
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
         net.load_state_dict(checkpoint['model_state_dict'])
         net.to(device)
         
         if parallel_mode == 'dp':
-            net = torch.nn.DataParallel(net)
-        else:
+            net = nn.DataParallel(net)
+        elif parallel_mode == 'ddp':
             net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank)
         
         net.eval()
@@ -194,18 +203,21 @@ def main():
         
         training_dataset = data.Dataset(data_dict=training_data_dict, normaliser=1, is_train=True)
         validation_dataset = data.Dataset(data_dict=validation_data_dict, normaliser=1, is_train=False)
+        
+        train_sampler = DistributedSampler(training_dataset) if parallel_mode == 'ddp' else None
+        valid_sampler = DistributedSampler(validation_dataset) if parallel_mode == 'ddp' else None
 
-        training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=False,
-                                                           pin_memory=True, num_workers=num_workers, sampler=DistributedSampler(training_dataset))
+        training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=(train_sampler is None),
+                                                           pin_memory=True, num_workers=num_workers, sampler=train_sampler)
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
-                                                             pin_memory=True, num_workers=num_workers, sampler=DistributedSampler(validation_dataset))
+                                                             pin_memory=True, num_workers=num_workers, sampler=valid_sampler)
    
         net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
-                                                         mixed_precision=mixed_precision)
+                                   mixed_precision=mixed_precision, use_sync_bn=(parallel_mode == 'ddp'))
         net.to(device)
         if parallel_mode == 'dp':
-            net = torch.nn.DataParallel(net)
-        else:
+            net = nn.DataParallel(net)
+        elif parallel_mode == 'ddp':
             net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank)
         model_parameters = filter(lambda p: p.requires_grad, net.parameters())
         logging.info('######### Network created #########')
@@ -250,7 +262,8 @@ def main():
         for epoch in range(start_epoch, num_epoch):
             # Required to reshuffle data correctly... 
             # See end of: https://pytorch.org/docs/stable/data.html#memory-pinning
-            training_data_loader.sampler.set_epoch(epoch)
+            if train_sampler is not None:
+                training_data_loader.sampler.set_epoch(epoch)
             
             if local_rank == 0:
                 logging.info("######### Epoch {}: Train #########".format(epoch + 1))
@@ -291,9 +304,11 @@ def main():
                     writer.add_scalar('Loss/train', loss_scalar, examples)
                     batch_pbar.set_description('Epoch {}. Train Loss: {}'.format(epoch, loss_scalar))
 
-            world_size = torch.distributed.get_world_size()
             losses, running_batches = world_size * [None], world_size * [None] 
-            torch.distributed.all_gather_object(losses, running_loss), torch.distributed.all_gather_object(running_batches, batches)
+            if parallel_mode == 'dpp':
+                torch.distributed.all_gather_object(losses, running_loss), torch.distributed.all_gather_object(running_batches, batches)
+            else:
+                losses[0], running_batches[0] = running_loss, batches
             
             if local_rank == 0:
                 logging.info('[%d] train loss: %.15f' %
