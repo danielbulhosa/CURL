@@ -85,6 +85,8 @@ class Evaluator():
             examples = 0.0
             running_loss = 0.0
             batches = 0.0
+            psnr_avg = 0.0
+            msssim_avg = 0.0
             
             for batch_num, data in batch_pbar:
 
@@ -106,8 +108,9 @@ class Evaluator():
                 running_loss += loss_scalar
                 examples += input_img_batch.shape[0]
                 batches += 1
-                                
-                psnr_avg += psnr.item()
+                
+                psnr_batches += 1 if psnr.item() is not None else 0
+                psnr_avg += psnr.item() if psnr.item() is not None else 0
                 msssim_avg += msssim.item()
                 
                 if save_images:
@@ -117,14 +120,17 @@ class Evaluator():
                     batch_pbar.set_description('Epoch {}. Loss: {}'.format(epoch, loss_scalar))
 
         world_size = torch.distributed.get_world_size()
-        losses, running_batches, running_psnr, running_msssim = world_size * [None], world_size * [None], world_size * [None], world_size * [None] 
+        losses, running_batches, running_pbatches, running_psnr, running_msssim = world_size * [None], world_size * [None], world_size * [None], \
+                                                                                  world_size * [None],  world_size * [None] 
         torch.distributed.all_gather_object(losses, running_loss), torch.distributed.all_gather_object(running_batches, batches)
-        torch.distributed.all_gather_object(running_psnr, psnr_avg), torch.distributed.all_gather_object(running_msssim, msssim_avg)
+        torch.distributed.all_gather_object(running_pbatches, psnr_batches), torch.distributed.all_gather_object(running_psnr, psnr_avg) 
+        torch.distributed.all_gather_object(running_msssim, msssim_avg)
+        
                     
         if self.local_rank == 0:
             logging.info('loss_%s: %.5f psnr_%s: %.3f msssim_%s: %.3f' % (
                 self.split_name, sum(losses) / sum(running_batches), self.split_name, 
-                sum(running_psnr)/ sum(running_batches), self.split_name, 
+                sum(running_psnr)/ sum(running_pbatches), self.split_name, 
                 sum(running_msssim)/ sum(running_batches)))
 
-        return sum(losses) / sum(running_batches), sum(running_psnr)/sum(running_batches), sum(running_msssim)/sum(running_batches)
+        return sum(losses) / sum(running_batches), sum(running_psnr)/sum(running_pbatches), sum(running_msssim)/sum(running_batches)

@@ -63,8 +63,9 @@ class PSNRMetric(nn.Module):
         psnr_val = 10 * torch.log10(max_intensity ** 2 /
                                     PSNRMetric.compute_mse(image_batchA, image_batchB, mask_batch))
 
-        # Take average over batch dimension
-        return psnr_val.mean()
+        # Take average over batch dimension, ignoring NaNs
+        psnr_mean = psnr_val.nanmean()
+        return psnr_mean if not psnr_mean.isnan() else None
     
     def forward(self, image_batchA, image_batchB, mask_batch):
         return PSNRMetric.compute_psnr(image_batchA, image_batchB, 
