@@ -87,6 +87,7 @@ class Evaluator():
             batches = 0.0
             psnr_avg = 0.0
             msssim_avg = 0.0
+            psnr_batches = 0.0
             
             for batch_num, data in batch_pbar:
 
