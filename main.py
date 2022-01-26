@@ -341,3 +341,8 @@ if __name__ == "__main__":
             os.system("kill $(ps aux | grep src/lib/curl/main.py | grep -v grep | awk '{print $2}') ")
         finally:
             raise e
+    finally:
+        try:
+            torch.distributed.destroy_process_group()
+        except:
+            os.system("kill $(ps aux | grep src/lib/curl/main.py | grep -v grep | awk '{print $2}') ")
