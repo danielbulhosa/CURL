@@ -234,9 +234,9 @@ def main():
             net.to(device)
         else:
             optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      net.parameters()), lr=1e-6, betas=(0.5, 0.999))
+                                      net.parameters()), lr=5e-7, betas=(0.5, 0.999))
             
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=4e-4, total_steps=num_epoch, 
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=2e-4, total_steps=num_epoch, 
                                                   verbose=(local_rank == 0))
         best_valid_psnr = 0.0
         optimizer.zero_grad()
