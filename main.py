@@ -83,25 +83,31 @@ def main():
     parser.add_argument(
         "--training_img_dirpath", required=False,
         help="Directory containing images to train a DeepLPF model instance", default="/home/sjm213/adobe5k/adobe5k/")
-    parser.add_argument("--batch_size", type=int, required=False,help="Batch size", default=1)
+    parser.add_argument("--batch_size", type=int, required=False, help="Batch size per gpu", default=32)
+    parser.add_argument("--num_workers", type=int, required=False, help="Number of workers per gpu", default=11)
+    parser.add_argument("--parallel_mode", type=str, required=False, help="ddp or dp", default='dp', choices=['dp', 'ddp'])
     parser.add_argument("--mixed_precision", type=bool, required=False, help="Batch size", default=False)
     parser.add_argument("--local_rank", type=int, required=False, default=0)
 
     args = parser.parse_args()
+    
+    # Secret parallelization sauce: https://medium.com/codex/distributed-training-on-multiple-gpus-e0ee9c3d0126
+    torch.distributed.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+    world_size = torch.distributed.get_world_size()
+    device_count = torch.cuda.device_count()
     
     num_epoch = args.num_epoch
     valid_every = args.valid_every
     checkpoint_filepath = args.checkpoint_filepath
     inference_img_dirpath = args.inference_img_dirpath
     training_img_dirpath = args.training_img_dirpath
-    batch_size = args.batch_size
+    batch_size = args.batch_size  * device_count / world_size
+    num_workers = args.num_workers * device_count / world_size
+    parallel_mode = args.parallel_mode
     mixed_precision = args.mixed_precision
     local_rank = args.local_rank
-    
-    # Secret parallelization sauce: https://medium.com/codex/distributed-training-on-multiple-gpus-e0ee9c3d0126
-    torch.distributed.init_process_group(backend="nccl")
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     writer = SummaryWriter()
@@ -147,7 +153,7 @@ def main():
                                          is_train=False)
 
         inference_data_loader = torch.utils.data.DataLoader(inference_dataset, batch_size=batch_size, shuffle=False,
-                                                            num_workers=10)
+                                                            num_workers=num_workers)
 
         '''
         Performs inference on all the images in inference_img_dirpath
@@ -160,7 +166,12 @@ def main():
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
         net.load_state_dict(checkpoint['model_state_dict'])
         net.to(device)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank)
+        
+        if parallel_mode == 'dp':
+            net = torch.nn.DataParallel(net)
+        else:
+            net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank)
+        
         net.eval()
 
         criterion = model.CURLLoss().to(device)
@@ -183,14 +194,17 @@ def main():
         validation_dataset = data.Dataset(data_dict=validation_data_dict, normaliser=1, is_train=False)
 
         training_data_loader = torch.utils.data.DataLoader(training_dataset, batch_size=batch_size, shuffle=False,
-                                                           pin_memory=True, num_workers=11, sampler=DistributedSampler(training_dataset))
+                                                           pin_memory=True, num_workers=num_workers, sampler=DistributedSampler(training_dataset))
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
-                                                             pin_memory=True, num_workers=11, sampler=DistributedSampler(validation_dataset))
+                                                             pin_memory=True, num_workers=num_workers, sampler=DistributedSampler(validation_dataset))
    
         net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
                                                          mixed_precision=mixed_precision)
         net.to(device)
-        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank)
+        if parallel_mode == 'dp':
+            net = torch.nn.DataParallel(net)
+        else:
+            net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[local_rank], output_device=local_rank)
         model_parameters = filter(lambda p: p.requires_grad, net.parameters())
         logging.info('######### Network created #########')
         criterion = model.CURLLoss(ssim_window_size=5).to(device)
@@ -315,4 +329,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        try:
+            torch.distributed.destroy_process_group()
+        except:
+            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ")
+        finally:
+            raise e
