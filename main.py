@@ -93,8 +93,6 @@ def main():
     
     # Secret parallelization sauce: https://medium.com/codex/distributed-training-on-multiple-gpus-e0ee9c3d0126
     torch.distributed.init_process_group(backend="nccl")
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
     world_size = torch.distributed.get_world_size()
     device_count = torch.cuda.device_count()
     
@@ -103,11 +101,15 @@ def main():
     checkpoint_filepath = args.checkpoint_filepath
     inference_img_dirpath = args.inference_img_dirpath
     training_img_dirpath = args.training_img_dirpath
-    batch_size = args.batch_size  * device_count / world_size
-    num_workers = args.num_workers * device_count / world_size
+    batch_size = int((args.batch_size  * device_count) / world_size)
+    num_workers = int((args.num_workers * device_count) / world_size)
     parallel_mode = args.parallel_mode
     mixed_precision = args.mixed_precision
     local_rank = args.local_rank
+    
+    # Parallelization part 2
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     writer = SummaryWriter()
@@ -232,9 +234,9 @@ def main():
             net.to(device)
         else:
             optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      net.parameters()), lr=5e-7, betas=(0.5, 0.999))
+                                      net.parameters()), lr=1e-6, betas=(0.5, 0.999))
             
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-4, total_steps=num_epoch, 
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=4e-4, total_steps=num_epoch, 
                                                   verbose=(local_rank == 0))
         best_valid_psnr = 0.0
         optimizer.zero_grad()
@@ -243,6 +245,7 @@ def main():
 
         if local_rank == 0:
             print(net)
+            print(args)
         
         for epoch in range(start_epoch, num_epoch):
             # Required to reshuffle data correctly... 
@@ -335,6 +338,6 @@ if __name__ == "__main__":
         try:
             torch.distributed.destroy_process_group()
         except:
-            os.system("kill $(ps aux | grep multiprocessing.spawn | grep -v grep | awk '{print $2}') ")
+            os.system("kill $(ps aux | grep src/lib/curl/main.py | grep -v grep | awk '{print $2}') ")
         finally:
             raise e
