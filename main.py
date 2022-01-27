@@ -60,11 +60,6 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.elastic.multiprocessing.errors import record
 import torch.multiprocessing
 
-# Resolves https://github.com/pytorch/pytorch/issues/67864
-# Also see: https://github.com/facebookresearch/maskrcnn-benchmark/issues/103
-# Without it, DP training crashes at arbitrary number of epochs
-torch.multiprocessing.set_sharing_strategy('file_system')
-
 np.set_printoptions(threshold=sys.maxsize)
 
 @record
@@ -90,7 +85,6 @@ def main():
     parser.add_argument("--batch_size", type=int, required=False, help="Batch size per gpu", default=32)
     parser.add_argument("--num_workers", type=int, required=False, help="Number of workers per gpu", default=11)
     parser.add_argument("--parallel_mode", type=str, required=False, help="ddp or dp, defaults to None (not parallelized)", default=None, choices=['dp', 'ddp'])
-    parser.add_argument("--mixed_precision", type=bool, required=False, help="Batch size", default=False)
     parser.add_argument("--local_rank", type=int, required=False, default=0)
 
     args = parser.parse_args()
@@ -103,6 +97,12 @@ def main():
         world_size = torch.distributed.get_world_size()
     else:
         world_size = 1
+        
+    if parallel_mode == 'dp':
+        # Supposedly resolves https://github.com/pytorch/pytorch/issues/67864
+        # Also see: https://github.com/facebookresearch/maskrcnn-benchmark/issues/103
+        # Either way, DP crashes after an arbitrary number of epochs
+        torch.multiprocessing.set_sharing_strategy('file_system')
     
     device_count = 1 if parallel_mode is None else torch.cuda.device_count() 
     
@@ -113,7 +113,6 @@ def main():
     training_img_dirpath = args.training_img_dirpath
     batch_size = int(args.batch_size  * device_count / world_size)
     num_workers = int(args.num_workers * device_count / world_size)
-    mixed_precision = args.mixed_precision
     local_rank = args.local_rank
     
     # Parallelization part 2
@@ -172,8 +171,7 @@ def main():
         logging.info(
             "Performing inference with images in directory: " + inference_img_dirpath)
 
-        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
-                                   mixed_precision=mixed_precision, use_sync_bn=(parallel_mode == 'ddp'))
+        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, use_sync_bn=(parallel_mode == 'ddp'))
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
         net.load_state_dict(checkpoint['model_state_dict'])
         net.to(device)
@@ -187,8 +185,7 @@ def main():
 
         criterion = model.CURLLoss().to(device)
 
-        inference_evaluator = evaluate.Evaluator(criterion, inference_data_loader, "test", log_dirpath, 
-                                                 mixed_precision=mixed_precision, local_rank=local_rank)
+        inference_evaluator = evaluate.Evaluator(criterion, inference_data_loader, "test", log_dirpath, local_rank=local_rank)
         inference_evaluator.evaluate(net, epoch=0, save_images=True)
 
     else:
@@ -212,8 +209,7 @@ def main():
         validation_data_loader = torch.utils.data.DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
                                                              pin_memory=True, num_workers=num_workers, sampler=valid_sampler)
    
-        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, 
-                                   mixed_precision=mixed_precision, use_sync_bn=(parallel_mode == 'ddp'))
+        net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, use_sync_bn=(parallel_mode == 'ddp'))
         net.to(device)
         if parallel_mode == 'dp':
             net = nn.DataParallel(net)
@@ -226,8 +222,7 @@ def main():
         '''
         The following objects allow for evaluation of a model on the validation split of the dataset
         '''
-        validation_evaluator = evaluate.Evaluator(criterion, validation_data_loader, "valid", log_dirpath,
-                                                  mixed_precision=mixed_precision, local_rank=local_rank)
+        validation_evaluator = evaluate.Evaluator(criterion, validation_data_loader, "valid", log_dirpath, local_rank=local_rank)
         start_epoch=0
 
         if (checkpoint_filepath is not None) and (inference_img_dirpath is None):
@@ -248,12 +243,11 @@ def main():
             optimizer = optim.Adam(filter(lambda p: p.requires_grad,
                                       net.parameters()), lr=5e-7, betas=(0.5, 0.999))
             
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=2e-4, total_steps=num_epoch, 
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-4, total_steps=num_epoch, 
                                                   verbose=(local_rank == 0))
         best_valid_psnr = 0.0
         optimizer.zero_grad()
         net.train()
-        scaler = torch.cuda.amp.GradScaler(enabled=mixed_precision)
 
         if local_rank == 0:
             print(net)
@@ -282,18 +276,13 @@ def main():
                                                             data['output_img'].to(device, non_blocking=True), \
                                                             data['mask'].to(device, non_blocking=True)
                 
+                net_img_batch = net(input_img_batch, mask_batch)
+                net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
+                # Calculate loss, leaving out masked pixels
+                loss = criterion(net_img_batch, gt_img_batch, mask_batch)
                 optimizer.zero_grad()
-                
-                # See: https://pytorch.org/docs/stable/notes/amp_examples.html#dataparallel-in-a-single-process
-                with torch.cuda.amp.autocast(enabled=mixed_precision):
-                    net_img_batch = net(input_img_batch, mask_batch)
-                    net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
-                    # Calculate loss, leaving out masked pixels
-                    loss = criterion(net_img_batch, gt_img_batch, mask_batch)
-                
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                loss.backward()
+                optimizer.step()
 
                 loss_scalar = loss.data.item()
                 running_loss += loss_scalar
@@ -303,9 +292,9 @@ def main():
                 if local_rank == 0:
                     writer.add_scalar('Loss/train', loss_scalar, examples)
                     batch_pbar.set_description('Epoch {}. Train Loss: {}'.format(epoch, loss_scalar))
-
+            
             losses, running_batches = world_size * [None], world_size * [None] 
-            if parallel_mode == 'dpp':
+            if parallel_mode == 'ddp':
                 torch.distributed.all_gather_object(losses, running_loss), torch.distributed.all_gather_object(running_batches, batches)
             else:
                 losses[0], running_batches[0] = running_loss, batches
@@ -314,6 +303,7 @@ def main():
                 logging.info('[%d] train loss: %.15f' %
                          (epoch + 1, sum(losses) / sum(running_batches)))
                 writer.add_scalar('Loss/train_smooth', sum(losses) / sum(running_batches), epoch + 1)
+            
                 
             scheduler.step()
             

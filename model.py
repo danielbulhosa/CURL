@@ -318,15 +318,13 @@ class TriSpaceRegNet(nn.Module):
     
     def __init__(self, polynomial_order=4, spatial=False, 
                  train_height=256, train_width=256,
-                 max_resolution=10000,
-                 mixed_precision=False, is_train=True,
+                 max_resolution=10000, is_train=True,
                  use_sync_bn=False):
         super(TriSpaceRegNet, self).__init__()
         self.num_channels = 3
         self.num_spaces = 3
         self.num_in = self.num_channels + 2 * spatial
         self.order = polynomial_order
-        self.mixed_precision = mixed_precision
         self.is_train = is_train
         self.train_height = train_height
         self.train_width = train_width
@@ -416,11 +414,9 @@ class TriSpaceRegNet(nn.Module):
         return R, L, H
     
     def forward(self, img, mask):
-        # See: https://pytorch.org/docs/stable/notes/amp_examples.html#dataparallel-in-a-single-process
-        with torch.cuda.amp.autocast(enabled=self.mixed_precision):
-            img_trans = self.transform(img)
-            mask_trans = self.transform(mask)
-            R, L, H = self.generate_coefficients(img_trans, mask_trans)
-            final_img = self.generate_image(img, R, L, H)
+        img_trans = self.transform(img)
+        mask_trans = self.transform(mask)
+        R, L, H = self.generate_coefficients(img_trans, mask_trans)
+        final_img = self.generate_image(img, R, L, H)
 
-            return final_img
+        return final_img
