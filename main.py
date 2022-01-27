@@ -59,8 +59,10 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.elastic.multiprocessing.errors import record
 import torch.multiprocessing
+import faulthandler
 
 np.set_printoptions(threshold=sys.maxsize)
+faulthandler.enable()
 
 @record
 def main():
@@ -224,27 +226,23 @@ def main():
         '''
         validation_evaluator = evaluate.Evaluator(criterion, validation_data_loader, "valid", log_dirpath, local_rank=local_rank)
         start_epoch=0
+        
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad,
+                               net.parameters()), lr=5e-7, betas=(0.5, 0.999))
+            
+        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-4, total_steps=num_epoch, 
+                                                  verbose=(local_rank == 0))
 
         if (checkpoint_filepath is not None) and (inference_img_dirpath is None):
             logging.info('######### Loading Checkpoint #########')
             checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
+            
             net.load_state_dict(checkpoint['model_state_dict'])
-            optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      net.parameters()), lr=1e-4, betas=(0.9, 0.999), eps=1e-08)
-
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            for g in optimizer.param_groups:
-                g['lr'] = 1e-5
-
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch']
             loss = checkpoint['loss']
-            net.to(device)
-        else:
-            optimizer = optim.Adam(filter(lambda p: p.requires_grad,
-                                      net.parameters()), lr=5e-7, betas=(0.5, 0.999))
-            
-        scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=1e-4, total_steps=num_epoch, 
-                                                  verbose=(local_rank == 0))
+
         best_valid_psnr = 0.0
         optimizer.zero_grad()
         net.train()
@@ -330,6 +328,7 @@ def main():
                          'epoch': epoch+1,
                          'model_state_dict': net.state_dict(),
                          'optimizer_state_dict': optimizer.state_dict(),
+                         'scheduler_state_dict': scheduler.state_dict(),
                          'loss': valid_loss,
                          }, snapshot_path)
 
