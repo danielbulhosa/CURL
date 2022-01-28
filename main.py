@@ -156,6 +156,9 @@ def main():
                                 a1242.tif
                                 etc
         '''
+        if parallel_mode is not None:
+            raise ValueError("Inference not supported with DP or DDP. Do not pass --parallel_mode parameter.")
+        
         data_dict = data.get_data_dict(inference_img_dirpath)
         inference_ids = data.get_data_ids(inference_img_dirpath+"/images_inference.txt")
         inference_data_dict = data.filter_data_dict(data_dict, inference_ids)
@@ -175,7 +178,16 @@ def main():
 
         net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, use_sync_bn=(parallel_mode == 'ddp'))
         checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
-        net.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Converts DP/DDP model state to regular model state
+        state_dict = checkpoint['model_state_dict']
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
+            new_state_dict[name] = v
+        
+        net.load_state_dict(new_state_dict)
         net.to(device)
         
         if parallel_mode == 'dp':
