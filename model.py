@@ -334,15 +334,13 @@ class TriSpaceRegNet(nn.Module):
                                           num_out=self.num_channels)
         self.num_coeffs = self.polylayer.num_coeffs
         
-        self.backbone = timm.create_model('efficientnetv2_rw_s', pretrained=True)
+        self.backbone = timm.create_model('efficientnetv2_rw_t', pretrained=True)
         if use_sync_bn:
             self.backbone = nn.SyncBatchNorm.convert_sync_batchnorm(self.backbone)
-        self.backbone.classifier = nn.Sequential(nn.Linear(in_features=1792, out_features=1792), # 1280 in for b0
-                                                 nn.Linear(in_features=1792, out_features=896),  
-                                                 nn.Linear(in_features=896, out_features=896),
-                                                 nn.Linear(in_features=896, out_features=448),
-                                                 nn.Linear(in_features=448, out_features=448),
-                                                 nn.Linear(in_features=448, out_features=self.num_spaces*self.num_channels*self.num_coeffs)
+        self.backbone.classifier = nn.Sequential(nn.Linear(in_features=1024, out_features=1024), # 1280 in for b0
+                                                 nn.Linear(in_features=1024, out_features=512),  
+                                                 nn.Linear(in_features=512, out_features=512),
+                                                 nn.Linear(in_features=512, out_features=self.num_spaces*self.num_channels*self.num_coeffs)
                                                )
         self.rgb2lab = colors.RGB2LAB()
         self.lab2rgb = colors.LAB2RGB()
