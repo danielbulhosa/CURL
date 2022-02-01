@@ -99,7 +99,6 @@ class Evaluator():
                     data['name']
                 
                 net_output_img_batch = net(input_img_batch, mask_batch)
-                net_output_img_batch = torch.clamp(net_output_img_batch, 0.0, 1.0)
                 loss = self.criterion(net_output_img_batch, output_img_batch, mask_batch)
                 psnr = self.psnr(output_img_batch, net_output_img_batch, mask_batch)
                 msssim = self.msssim(output_img_batch * mask_batch, 
