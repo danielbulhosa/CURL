@@ -118,9 +118,8 @@ def main():
     local_rank = args.local_rank
     
     # Parallelization part 2
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     writer = SummaryWriter()
 
@@ -177,7 +176,7 @@ def main():
             "Performing inference with images in directory: " + inference_img_dirpath)
 
         net = model.TriSpaceRegNet(polynomial_order=4, spatial=True, use_sync_bn=(parallel_mode == 'ddp'))
-        checkpoint = torch.load(checkpoint_filepath, map_location='cuda')
+        checkpoint = torch.load(checkpoint_filepath, map_location=device)
         
         # Converts DP/DDP model state to regular model state
         state_dict = checkpoint['model_state_dict']
@@ -186,7 +185,7 @@ def main():
         for k, v in state_dict.items():
             name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
             new_state_dict[name] = v
-        
+
         net.load_state_dict(new_state_dict)
         net.to(device)
         
@@ -287,7 +286,6 @@ def main():
                                                             data['mask'].to(device, non_blocking=True)
                 
                 net_img_batch = net(input_img_batch, mask_batch)
-                net_img_batch = torch.clamp(net_img_batch, 0.0, 1.0)
                 # Calculate loss, leaving out masked pixels
                 loss = criterion(net_img_batch, gt_img_batch, mask_batch)
                 optimizer.zero_grad()
