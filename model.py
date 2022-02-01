@@ -333,12 +333,12 @@ class TriSpaceRegNet(nn.Module):
                                           num_variables=self.num_in,
                                           num_out=self.num_channels)
         self.num_coeffs = self.polylayer.num_coeffs
-        
+
         self.backbone = timm.create_model('efficientnetv2_rw_t', pretrained=True)
         if use_sync_bn:
             self.backbone = nn.SyncBatchNorm.convert_sync_batchnorm(self.backbone)
         self.backbone.classifier = nn.Sequential(nn.Linear(in_features=1024, out_features=1024), # 1280 in for b0
-                                                 nn.Linear(in_features=1024, out_features=512),  
+                                                 nn.Linear(in_features=1024, out_features=512),
                                                  nn.Linear(in_features=512, out_features=512),
                                                  nn.Linear(in_features=512, out_features=self.num_spaces*self.num_channels*self.num_coeffs)
                                                )
@@ -365,12 +365,13 @@ class TriSpaceRegNet(nn.Module):
         # Downsamples images at inference, which may be fuller resolution images.
         # These methods don't have parameters so DataParallel doesn't care...
         # ¯\_(ツ)_/¯
-        self.transform = self.check_size if self.is_train else trans.CenterCrop((self.train_height, self.train_width))
-            
+        self.cropper = torch.jit.script(trans.CenterCrop((self.train_height, self.train_width)))
+        self.transform = self.check_size if self.is_train else self.cropper
+
     def check_size(self, img):
         assert img.shape[-1] == self.train_width and img.shape[-2] == self.train_height, \
             "Input image dims for training should be ( , )".format(self.train_width, self.train_height)
-        
+
         return img
 
     def cat_coords(self, img):
@@ -401,8 +402,9 @@ class TriSpaceRegNet(nn.Module):
         hsv_res = 2 * (hsv_res - 0.5)
         
         final_img = img + rgb_res + lab_res + hsv_res
-        
-        return final_img
+
+        # Without clamping we get weird artifacts when saving as image in PIL at inference time
+        return torch.clamp(final_img, 0.0, 1.0)
     
     def generate_coefficients(self, img, mask):
         coeffs = self.backbone(img * mask).reshape(img.shape[0], self.num_spaces, 
