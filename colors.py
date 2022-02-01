@@ -88,7 +88,7 @@ class LAB2RGB(nn.Module):
         channel1 = torch.unsqueeze(((img[:, 1, :, :] * 2)-1)*110, dim=1)
         channel2 = torch.unsqueeze(((img[:, 2, :, :] * 2)-1)*110, dim=1)
 
-        img = torch.concat([channel0, channel1, channel2], dim=1)
+        img = torch.cat([channel0, channel1, channel2], dim=1)
 
         img = torch.einsum('bcxy,ck->bkxy', 
                            img + self.lab_to_fxfyfz_offset, 
