@@ -1,6 +1,6 @@
 numpy==1.19.2
 scipy==1.5.2
-torch==1.10.1
+torch==1.10.2
 scikit_image==0.18.1
 torchvision==0.11.2
 matplotlib==3.3.2
@@ -10,3 +10,4 @@ tensorboard
 tqdm
 timm==0.5.4
 torchsummary==1.5.1
+coremltools==5.1
