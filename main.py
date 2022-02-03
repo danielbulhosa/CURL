@@ -60,6 +60,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.elastic.multiprocessing.errors import record
 import torch.multiprocessing
 import faulthandler
+from convert_state import convert_state_dict
 
 np.set_printoptions(threshold=sys.maxsize)
 faulthandler.enable()
@@ -179,13 +180,7 @@ def main():
         checkpoint = torch.load(checkpoint_filepath, map_location=device)
         
         # Converts DP/DDP model state to regular model state
-        state_dict = checkpoint['model_state_dict']
-        from collections import OrderedDict
-        new_state_dict = OrderedDict()
-        for k, v in state_dict.items():
-            name = k[7:] # remove 'module.' of DataParallel/DistributedDataParallel
-            new_state_dict[name] = v
-
+        new_state_dict = convert_state_dict(checkpoint['model_state_dict'])
         net.load_state_dict(new_state_dict)
         net.to(device)
         
