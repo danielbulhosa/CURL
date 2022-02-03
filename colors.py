@@ -5,18 +5,22 @@ class RGB2LAB(nn.Module):
     
     def __init__(self):
         super(RGB2LAB, self).__init__()
-        self.rgb_to_xyz = nn.Parameter(torch.tensor(
+        self.rgb_to_xyz = torch.tensor(
                                         [  # X        Y          Z
                                             [0.412453, 0.212671, 0.019334],  # R
                                             [0.357580, 0.715160, 0.119193],  # G
                                             [0.180423, 0.072169, 0.950227],  # B
-                                        ], dtype=torch.float), requires_grad=False)
-        self.fxfyfz_to_lab = nn.Parameter(torch.tensor(
+                                        ], dtype=torch.float)
+        self.rgb_to_xyz = nn.Parameter(torch.unsqueeze(torch.unsqueeze(self.rgb_to_xyz.transpose(1, 0), 0), 0),
+                                       requires_grad=False)
+        self.fxfyfz_to_lab = torch.tensor(
                                             [
                                                 [0.0,  500.0,    0.0],  # fx
                                                 [116.0, -500.0,  200.0],  # fy
                                                 [0.0,    0.0, -200.0],  # fz
-                                            ], dtype=torch.float), requires_grad=False)
+                                            ], dtype=torch.float)
+        self.fxfyfz_to_lab = nn.Parameter(torch.unsqueeze(torch.unsqueeze(self.fxfyfz_to_lab.transpose(1, 0), 0), 0),
+                                          requires_grad=False)
         self.xyz_to_rgb_mult = nn.Parameter(torch.tensor([0.950456, 1.0, 1.088754], dtype=torch.float).reshape(1, 3, 1, 1), requires_grad=False)
         self.lab_to_fxfyfz_offset = nn.Parameter(torch.tensor([16.0, 0.0, 0.0], dtype=torch.float).reshape(1, 3, 1, 1), requires_grad=False)
         
@@ -32,7 +36,8 @@ class RGB2LAB(nn.Module):
 
         img = (img / 12.92) * img.le(0.04045).float() + (((torch.clamp(img,
                                                                        min=0.0001) + 0.055) / 1.055) ** 2.4) * img.gt(0.04045).float()
-        img = torch.einsum('bcxy,ck->bkxy', img, self.rgb_to_xyz)
+        # Original format was bcyx,ck->bkyx -- had to update to work with coremltools 5.1
+        img = torch.einsum('bcyx,bykc->bkyx', img, self.rgb_to_xyz)
         img = torch.mul(img, 1/self.xyz_to_rgb_mult)
 
         epsilon = 6/29
@@ -41,7 +46,8 @@ class RGB2LAB(nn.Module):
             (torch.clamp(img, min=0.0001) **
              (1.0/3.0) * img.gt(epsilon**3).float())
 
-        img = torch.einsum('bcxy,ck->bkxy', img, self.fxfyfz_to_lab) - self.lab_to_fxfyfz_offset
+        # Original format was bcyx,ck->bkyx -- had to update to work with coremltools 5.1
+        img = torch.einsum('bcyx,bykc->bkyx', img, self.fxfyfz_to_lab) - self.lab_to_fxfyfz_offset
 
         '''
         L_chan: black and white with input range [0, 100]
@@ -60,18 +66,22 @@ class LAB2RGB(nn.Module):
     
     def __init__(self):
         super(LAB2RGB, self).__init__()
-        self.xyz_to_rgb = nn.Parameter(torch.tensor(
+        self.xyz_to_rgb = torch.tensor(
                                         [   # X          Y           Z
                                             [3.2404542, -0.9692660,  0.0556434],  # R
                                             [-1.5371385,  1.8760108, -0.2040259],  # G
                                             [-0.4985314,  0.0415560,  1.0572252],  # B
-                                        ], dtype=torch.float), requires_grad=False)
-        self.lab_to_fxfyfz = nn.Parameter(torch.tensor(
+                                        ], dtype=torch.float)
+        self.xyz_to_rgb = nn.Parameter(torch.unsqueeze(torch.unsqueeze(self.xyz_to_rgb.transpose(1, 0), 0), 0),
+                                       requires_grad=False)
+        self.lab_to_fxfyfz = torch.tensor(
                                             [   # X       Y         Z
                                                 [1/116.0, 1/116.0, 1/116.0],  # R
                                                 [1/500.0, 0, 0],  # G
                                                 [0, 0, -1/200.0],  # B
-                                            ], dtype=torch.float), requires_grad=False)
+                                            ], dtype=torch.float)
+        self.lab_to_fxfyfz = nn.Parameter(torch.unsqueeze(torch.unsqueeze(self.lab_to_fxfyfz.transpose(1, 0), 0), 0),
+                                          requires_grad=False)
         self.xyz_to_rgb_mult = nn.Parameter(torch.tensor([0.950456, 1.0, 1.088754], dtype=torch.float).reshape(1, 3, 1, 1), requires_grad=False)
         self.lab_to_fxfyfz_offset = nn.Parameter(torch.tensor([16.0, 0.0, 0.0], dtype=torch.float).reshape(1, 3, 1, 1), requires_grad=False)
 
@@ -90,7 +100,8 @@ class LAB2RGB(nn.Module):
 
         img = torch.cat([channel0, channel1, channel2], dim=1)
 
-        img = torch.einsum('bcxy,ck->bkxy', 
+        # Original format was bcyx,ck->bkyx -- had to update to work with coremltools 5.1
+        img = torch.einsum('bcyx,bykc->bkyx',
                            img + self.lab_to_fxfyfz_offset, 
                            self.lab_to_fxfyfz)
 
@@ -102,7 +113,8 @@ class LAB2RGB(nn.Module):
         # denormalize for D65 white point
         img = torch.mul(img, self.xyz_to_rgb_mult)
 
-        img = torch.einsum('bcxy,ck->bkxy', img, self.xyz_to_rgb)
+        # Original format was bcyx,ck->bkyx -- had to update to work with coremltools 5.1
+        img = torch.einsum('bcyx,bykc->bkyx', img, self.xyz_to_rgb)
         img = (img * 12.92 * img.le(0.0031308).float()) + ((torch.clamp(img,
                                                                         min=0.0001) ** (1/2.4) * 1.055) - 0.055) * img.gt(0.0031308).float()
 
