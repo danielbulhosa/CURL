@@ -224,7 +224,7 @@ class ChannelPolyLayer(nn.Module):
     def generate_powers(order, n_variables):
         """
         Find the exponents of a multivariate polynomial expression of order
-        `order` and `n_variable` number of variables. 
+        `order` and `n_variable` number of variables.
         From: https://stackoverflow.com/questions/4913902/optimize-generator-for-multivariate-polynomial-exponents
         """
         pattern = [0] * n_variables
@@ -244,7 +244,23 @@ class ChannelPolyLayer(nn.Module):
                         break
                 yield tuple(pattern)
             pattern[-1] = 0
-    
+
+    @staticmethod
+    def generate_poly_string(img_name, coeff_name, order, n_variables):
+        poly_terms = []
+
+        for term_num, powers in enumerate(ChannelPolyLayer.generate_powers(order, n_variables)):
+            poly_terms.append('{}[:, {}]'.format(coeff_name, term_num))
+            for idx, power in enumerate(powers):
+                if power == 0:
+                    continue
+                elif power == 1:
+                    poly_terms[term_num] += "*{}[:, {}]".format(img_name, idx)
+                else:
+                    poly_terms[term_num] += "*({}[:, {}]**{})".format(img_name, idx, power)
+
+        return ' + '.join(poly_terms)
+
     @staticmethod
     def ncr(n, r):
         r = min(r, n-r)
@@ -291,8 +307,80 @@ class ChannelPolyLayer(nn.Module):
         
         return (coeffs.reshape(img.shape[0], self.num_out, 1, 1, self.num_coeffs) * \
                 torch.unsqueeze(poly_terms, dim=1)).sum(dim=-1)
-        
-    
+
+
+class Deg4MobilePolyLayer(nn.Module):
+
+    def __init__(self):
+        super(Deg4MobilePolyLayer, self).__init__()
+        self.num_coeffs = 126
+        # Need to be able to load state from ChannelPolyLayer
+        self.powers = nn.Parameter(torch.Tensor(list(ChannelPolyLayer.generate_powers(4, 5))),
+                                   requires_grad=False)
+
+    @staticmethod
+    def poly(img, C):
+        # Generated with `ChannelPolyLayer.generate_poly_string('img', 'C', 4, 5)`
+        return C[:, 0] + C[:, 1]*img[:, 0] + C[:, 2]*img[:, 1] + C[:, 3]*img[:, 2] + C[:, 4]*img[:, 3] + C[:, 5]*img[:, 4] \
+               + C[:, 6]*(img[:, 0]**2) + C[:, 7]*img[:, 0]*img[:, 1] + C[:, 8]*img[:, 0]*img[:, 2] + C[:, 9]*img[:, 0]*img[:, 3] \
+               + C[:, 10]*img[:, 0]*img[:, 4] + C[:, 11]*(img[:, 1]**2) + C[:, 12]*img[:, 1]*img[:, 2] + C[:, 13]*img[:, 1]*img[:, 3] \
+               + C[:, 14]*img[:, 1]*img[:, 4] + C[:, 15]*(img[:, 2]**2) + C[:, 16]*img[:, 2]*img[:, 3] + C[:, 17]*img[:, 2]*img[:, 4] \
+               + C[:, 18]*(img[:, 3]**2) + C[:, 19]*img[:, 3]*img[:, 4] + C[:, 20]*(img[:, 4]**2) + C[:, 21]*(img[:, 0]**3) \
+               + C[:, 22]*(img[:, 0]**2)*img[:, 1] + C[:, 23]*(img[:, 0]**2)*img[:, 2] + C[:, 24]*(img[:, 0]**2)*img[:, 3] \
+               + C[:, 25]*(img[:, 0]**2)*img[:, 4] + C[:, 26]*img[:, 0]*(img[:, 1]**2) + C[:, 27]*img[:, 0]*img[:, 1]*img[:, 2] \
+               + C[:, 28]*img[:, 0]*img[:, 1]*img[:, 3] + C[:, 29]*img[:, 0]*img[:, 1]*img[:, 4] + C[:, 30]*img[:, 0]*(img[:, 2]**2) \
+               + C[:, 31]*img[:, 0]*img[:, 2]*img[:, 3] + C[:, 32]*img[:, 0]*img[:, 2]*img[:, 4] + C[:, 33]*img[:, 0]*(img[:, 3]**2) \
+               + C[:, 34]*img[:, 0]*img[:, 3]*img[:, 4] + C[:, 35]*img[:, 0]*(img[:, 4]**2) + C[:, 36]*(img[:, 1]**3) \
+               + C[:, 37]*(img[:, 1]**2)*img[:, 2] + C[:, 38]*(img[:, 1]**2)*img[:, 3] + C[:, 39]*(img[:, 1]**2)*img[:, 4] \
+               + C[:, 40]*img[:, 1]*(img[:, 2]**2) + C[:, 41]*img[:, 1]*img[:, 2]*img[:, 3] + C[:, 42]*img[:, 1]*img[:, 2]*img[:, 4] \
+               + C[:, 43]*img[:, 1]*(img[:, 3]**2) + C[:, 44]*img[:, 1]*img[:, 3]*img[:, 4] + C[:, 45]*img[:, 1]*(img[:, 4]**2) \
+               + C[:, 46]*(img[:, 2]**3) + C[:, 47]*(img[:, 2]**2)*img[:, 3] + C[:, 48]*(img[:, 2]**2)*img[:, 4] \
+               + C[:, 49]*img[:, 2]*(img[:, 3]**2) + C[:, 50]*img[:, 2]*img[:, 3]*img[:, 4] + C[:, 51]*img[:, 2]*(img[:, 4]**2) \
+               + C[:, 52]*(img[:, 3]**3) + C[:, 53]*(img[:, 3]**2)*img[:, 4] + C[:, 54]*img[:, 3]*(img[:, 4]**2) \
+               + C[:, 55]*(img[:, 4]**3) + C[:, 56]*(img[:, 0]**4) + C[:, 57]*(img[:, 0]**3)*img[:, 1] + C[:, 58]*(img[:, 0]**3)*img[:, 2] \
+               + C[:, 59]*(img[:, 0]**3)*img[:, 3] + C[:, 60]*(img[:, 0]**3)*img[:, 4] + C[:, 61]*(img[:, 0]**2)*(img[:, 1]**2) \
+               + C[:, 62]*(img[:, 0]**2)*img[:, 1]*img[:, 2] + C[:, 63]*(img[:, 0]**2)*img[:, 1]*img[:, 3] \
+               + C[:, 64]*(img[:, 0]**2)*img[:, 1]*img[:, 4] + C[:, 65]*(img[:, 0]**2)*(img[:, 2]**2) \
+               + C[:, 66]*(img[:, 0]**2)*img[:, 2]*img[:, 3] + C[:, 67]*(img[:, 0]**2)*img[:, 2]*img[:, 4] \
+               + C[:, 68]*(img[:, 0]**2)*(img[:, 3]**2) + C[:, 69]*(img[:, 0]**2)*img[:, 3]*img[:, 4] \
+               + C[:, 70]*(img[:, 0]**2)*(img[:, 4]**2) + C[:, 71]*img[:, 0]*(img[:, 1]**3) \
+               + C[:, 72]*img[:, 0]*(img[:, 1]**2)*img[:, 2] + C[:, 73]*img[:, 0]*(img[:, 1]**2)*img[:, 3] \
+               + C[:, 74]*img[:, 0]*(img[:, 1]**2)*img[:, 4] + C[:, 75]*img[:, 0]*img[:, 1]*(img[:, 2]**2) \
+               + C[:, 76]*img[:, 0]*img[:, 1]*img[:, 2]*img[:, 3] + C[:, 77]*img[:, 0]*img[:, 1]*img[:, 2]*img[:, 4] \
+               + C[:, 78]*img[:, 0]*img[:, 1]*(img[:, 3]**2) + C[:, 79]*img[:, 0]*img[:, 1]*img[:, 3]*img[:, 4] \
+               + C[:, 80]*img[:, 0]*img[:, 1]*(img[:, 4]**2) + C[:, 81]*img[:, 0]*(img[:, 2]**3) \
+               + C[:, 82]*img[:, 0]*(img[:, 2]**2)*img[:, 3] + C[:, 83]*img[:, 0]*(img[:, 2]**2)*img[:, 4] \
+               + C[:, 84]*img[:, 0]*img[:, 2]*(img[:, 3]**2) + C[:, 85]*img[:, 0]*img[:, 2]*img[:, 3]*img[:, 4] \
+               + C[:, 86]*img[:, 0]*img[:, 2]*(img[:, 4]**2) + C[:, 87]*img[:, 0]*(img[:, 3]**3) \
+               + C[:, 88]*img[:, 0]*(img[:, 3]**2)*img[:, 4] + C[:, 89]*img[:, 0]*img[:, 3]*(img[:, 4]**2) \
+               + C[:, 90]*img[:, 0]*(img[:, 4]**3) + C[:, 91]*(img[:, 1]**4) + C[:, 92]*(img[:, 1]**3)*img[:, 2] \
+               + C[:, 93]*(img[:, 1]**3)*img[:, 3] + C[:, 94]*(img[:, 1]**3)*img[:, 4] + C[:, 95]*(img[:, 1]**2)*(img[:, 2]**2) \
+               + C[:, 96]*(img[:, 1]**2)*img[:, 2]*img[:, 3] + C[:, 97]*(img[:, 1]**2)*img[:, 2]*img[:, 4] \
+               + C[:, 98]*(img[:, 1]**2)*(img[:, 3]**2) + C[:, 99]*(img[:, 1]**2)*img[:, 3]*img[:, 4] \
+               + C[:, 100]*(img[:, 1]**2)*(img[:, 4]**2) + C[:, 101]*img[:, 1]*(img[:, 2]**3) \
+               + C[:, 102]*img[:, 1]*(img[:, 2]**2)*img[:, 3] + C[:, 103]*img[:, 1]*(img[:, 2]**2)*img[:, 4] \
+               + C[:, 104]*img[:, 1]*img[:, 2]*(img[:, 3]**2) + C[:, 105]*img[:, 1]*img[:, 2]*img[:, 3]*img[:, 4] \
+               + C[:, 106]*img[:, 1]*img[:, 2]*(img[:, 4]**2) + C[:, 107]*img[:, 1]*(img[:, 3]**3) \
+               + C[:, 108]*img[:, 1]*(img[:, 3]**2)*img[:, 4] + C[:, 109]*img[:, 1]*img[:, 3]*(img[:, 4]**2) \
+               + C[:, 110]*img[:, 1]*(img[:, 4]**3) + C[:, 111]*(img[:, 2]**4) + C[:, 112]*(img[:, 2]**3)*img[:, 3] \
+               + C[:, 113]*(img[:, 2]**3)*img[:, 4] + C[:, 114]*(img[:, 2]**2)*(img[:, 3]**2) \
+               + C[:, 115]*(img[:, 2]**2)*img[:, 3]*img[:, 4] + C[:, 116]*(img[:, 2]**2)*(img[:, 4]**2) \
+               + C[:, 117]*img[:, 2]*(img[:, 3]**3) + C[:, 118]*img[:, 2]*(img[:, 3]**2)*img[:, 4] \
+               + C[:, 119]*img[:, 2]*img[:, 3]*(img[:, 4]**2) + C[:, 120]*img[:, 2]*(img[:, 4]**3) \
+               + C[:, 121]*(img[:, 3]**4) + C[:, 122]*(img[:, 3]**3)*img[:, 4] \
+               + C[:, 123]*(img[:, 3]**2)*(img[:, 4]**2) + C[:, 124]*img[:, 3]*(img[:, 4]**3) + C[:, 125]*(img[:, 4]**4)
+
+    def forward(self, img, coeffs):
+        # Equivalent to ChannelPolyLayer(degree=4, num_variables=5, num_out=3).forward
+        C0, C1, C2 = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
+
+        out0 = torch.unsqueeze(Deg4MobilePolyLayer.poly(img, C0), 1)
+        out1 = torch.unsqueeze(Deg4MobilePolyLayer.poly(img, C1), 1)
+        out2 = torch.unsqueeze(Deg4MobilePolyLayer.poly(img, C2), 1)
+
+        return torch.cat([out0, out1, out2], dim=1)
+
+
 class PolyRegNet(nn.Module):
     
     def __init__(self, num_channels=3, polynomial_order=4):
@@ -317,21 +405,18 @@ class PolyRegNet(nn.Module):
 class TriSpaceRegNet(nn.Module):
     
     def __init__(self, polynomial_order=4, spatial=False, 
-                 train_height=256, train_width=256,
                  max_resolution=10000, is_train=True,
-                 use_sync_bn=False):
+                 use_sync_bn=False, polylayer=None):
         super(TriSpaceRegNet, self).__init__()
         self.num_channels = 3
         self.num_spaces = 3
         self.num_in = self.num_channels + 2 * spatial
         self.order = polynomial_order
         self.is_train = is_train
-        self.train_height = train_height
-        self.train_width = train_width
         self.max_resolution = max_resolution
-        self.polylayer = ChannelPolyLayer(degree=self.order, 
-                                          num_variables=self.num_in,
-                                          num_out=self.num_channels)
+        self.polylayer = polylayer if polylayer is not None else ChannelPolyLayer(degree=self.order,
+                                                                                  num_variables=self.num_in,
+                                                                                  num_out=self.num_channels)
         self.num_coeffs = self.polylayer.num_coeffs
 
         self.backbone = timm.create_model('efficientnetv2_rw_t', pretrained=True)
@@ -361,18 +446,6 @@ class TriSpaceRegNet(nn.Module):
             
         self.x = torch.nn.Parameter(self.x, requires_grad=False)
         self.y = torch.nn.Parameter(self.y, requires_grad=False)
-        
-        # Downsamples images at inference, which may be fuller resolution images.
-        # These methods don't have parameters so DataParallel doesn't care...
-        # ¯\_(ツ)_/¯
-        self.cropper = torch.jit.script(trans.CenterCrop((self.train_height, self.train_width)))
-        self.transform = self.check_size if self.is_train else self.cropper
-
-    def check_size(self, img):
-        assert img.shape[-1] == self.train_width and img.shape[-2] == self.train_height, \
-            "Input image dims for training should be ( , )".format(self.train_width, self.train_height)
-
-        return img
 
     def cat_coords(self, img):
         """
@@ -413,10 +486,9 @@ class TriSpaceRegNet(nn.Module):
         R, L, H = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
         return R, L, H
     
-    def forward(self, img, mask):
-        img_trans = self.transform(img)
-        mask_trans = self.transform(mask)
-        R, L, H = self.generate_coefficients(img_trans, mask_trans)
-        final_img = self.generate_image(img, R, L, H)
+    def forward(self, img, mask, target_img=None):
+        R, L, H = self.generate_coefficients(img, mask)
+        input_img = img if target_img is None else target_img
+        final_img = self.generate_image(input_img, R, L, H)
 
         return final_img
