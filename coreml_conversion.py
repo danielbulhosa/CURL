@@ -41,3 +41,6 @@ def convert():
     output = ctnet.predict({"image": TF.to_pil_image(example_img[0]),
                             "mask": TF.to_pil_image(example_mask[0]),
                             "target": TF.to_pil_image(example_target[0])})
+
+if __name__ == '__main__':
+    convert()
