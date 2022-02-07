@@ -262,6 +262,30 @@ class ChannelPolyLayer(nn.Module):
         return ' + '.join(poly_terms)
 
     @staticmethod
+    def generate_poly_terms(img_us_name, order, n_variables):
+        poly_terms = []
+
+        for term_num, powers in enumerate(ChannelPolyLayer.generate_powers(order, n_variables)):
+            monomials = []
+
+            for idx, power in enumerate(powers):
+                if power == 0:
+                    continue
+                elif power == 1:
+                    monomials.append("{}[:, {}]".format(img_us_name, idx))
+                else:
+                    monomials.append("({}[:, {}]**{})".format(img_us_name, idx, power))
+
+            if len(monomials) == 0:
+                poly_term = '(1.0 + {}[:, 0] * 0.0)'.format(img_us_name)
+            else:
+                poly_term = '*'.join(monomials)
+
+            poly_terms.append(poly_term)
+
+        return 'torch.cat([' + ', '.join(poly_terms) + '], dim=-1)'
+
+    @staticmethod
     def ncr(n, r):
         r = min(r, n-r)
         numer = reduce(op.mul, range(n, n-r, -1), 1)
@@ -319,66 +343,76 @@ class Deg4MobilePolyLayer(nn.Module):
                                    requires_grad=False)
 
     @staticmethod
-    def poly(img, C):
-        # Generated with `ChannelPolyLayer.generate_poly_string('img', 'C', 4, 5)`
-        return C[:, 0] + C[:, 1]*img[:, 0] + C[:, 2]*img[:, 1] + C[:, 3]*img[:, 2] + C[:, 4]*img[:, 3] + C[:, 5]*img[:, 4] \
-               + C[:, 6]*(img[:, 0]**2) + C[:, 7]*img[:, 0]*img[:, 1] + C[:, 8]*img[:, 0]*img[:, 2] + C[:, 9]*img[:, 0]*img[:, 3] \
-               + C[:, 10]*img[:, 0]*img[:, 4] + C[:, 11]*(img[:, 1]**2) + C[:, 12]*img[:, 1]*img[:, 2] + C[:, 13]*img[:, 1]*img[:, 3] \
-               + C[:, 14]*img[:, 1]*img[:, 4] + C[:, 15]*(img[:, 2]**2) + C[:, 16]*img[:, 2]*img[:, 3] + C[:, 17]*img[:, 2]*img[:, 4] \
-               + C[:, 18]*(img[:, 3]**2) + C[:, 19]*img[:, 3]*img[:, 4] + C[:, 20]*(img[:, 4]**2) + C[:, 21]*(img[:, 0]**3) \
-               + C[:, 22]*(img[:, 0]**2)*img[:, 1] + C[:, 23]*(img[:, 0]**2)*img[:, 2] + C[:, 24]*(img[:, 0]**2)*img[:, 3] \
-               + C[:, 25]*(img[:, 0]**2)*img[:, 4] + C[:, 26]*img[:, 0]*(img[:, 1]**2) + C[:, 27]*img[:, 0]*img[:, 1]*img[:, 2] \
-               + C[:, 28]*img[:, 0]*img[:, 1]*img[:, 3] + C[:, 29]*img[:, 0]*img[:, 1]*img[:, 4] + C[:, 30]*img[:, 0]*(img[:, 2]**2) \
-               + C[:, 31]*img[:, 0]*img[:, 2]*img[:, 3] + C[:, 32]*img[:, 0]*img[:, 2]*img[:, 4] + C[:, 33]*img[:, 0]*(img[:, 3]**2) \
-               + C[:, 34]*img[:, 0]*img[:, 3]*img[:, 4] + C[:, 35]*img[:, 0]*(img[:, 4]**2) + C[:, 36]*(img[:, 1]**3) \
-               + C[:, 37]*(img[:, 1]**2)*img[:, 2] + C[:, 38]*(img[:, 1]**2)*img[:, 3] + C[:, 39]*(img[:, 1]**2)*img[:, 4] \
-               + C[:, 40]*img[:, 1]*(img[:, 2]**2) + C[:, 41]*img[:, 1]*img[:, 2]*img[:, 3] + C[:, 42]*img[:, 1]*img[:, 2]*img[:, 4] \
-               + C[:, 43]*img[:, 1]*(img[:, 3]**2) + C[:, 44]*img[:, 1]*img[:, 3]*img[:, 4] + C[:, 45]*img[:, 1]*(img[:, 4]**2) \
-               + C[:, 46]*(img[:, 2]**3) + C[:, 47]*(img[:, 2]**2)*img[:, 3] + C[:, 48]*(img[:, 2]**2)*img[:, 4] \
-               + C[:, 49]*img[:, 2]*(img[:, 3]**2) + C[:, 50]*img[:, 2]*img[:, 3]*img[:, 4] + C[:, 51]*img[:, 2]*(img[:, 4]**2) \
-               + C[:, 52]*(img[:, 3]**3) + C[:, 53]*(img[:, 3]**2)*img[:, 4] + C[:, 54]*img[:, 3]*(img[:, 4]**2) \
-               + C[:, 55]*(img[:, 4]**3) + C[:, 56]*(img[:, 0]**4) + C[:, 57]*(img[:, 0]**3)*img[:, 1] + C[:, 58]*(img[:, 0]**3)*img[:, 2] \
-               + C[:, 59]*(img[:, 0]**3)*img[:, 3] + C[:, 60]*(img[:, 0]**3)*img[:, 4] + C[:, 61]*(img[:, 0]**2)*(img[:, 1]**2) \
-               + C[:, 62]*(img[:, 0]**2)*img[:, 1]*img[:, 2] + C[:, 63]*(img[:, 0]**2)*img[:, 1]*img[:, 3] \
-               + C[:, 64]*(img[:, 0]**2)*img[:, 1]*img[:, 4] + C[:, 65]*(img[:, 0]**2)*(img[:, 2]**2) \
-               + C[:, 66]*(img[:, 0]**2)*img[:, 2]*img[:, 3] + C[:, 67]*(img[:, 0]**2)*img[:, 2]*img[:, 4] \
-               + C[:, 68]*(img[:, 0]**2)*(img[:, 3]**2) + C[:, 69]*(img[:, 0]**2)*img[:, 3]*img[:, 4] \
-               + C[:, 70]*(img[:, 0]**2)*(img[:, 4]**2) + C[:, 71]*img[:, 0]*(img[:, 1]**3) \
-               + C[:, 72]*img[:, 0]*(img[:, 1]**2)*img[:, 2] + C[:, 73]*img[:, 0]*(img[:, 1]**2)*img[:, 3] \
-               + C[:, 74]*img[:, 0]*(img[:, 1]**2)*img[:, 4] + C[:, 75]*img[:, 0]*img[:, 1]*(img[:, 2]**2) \
-               + C[:, 76]*img[:, 0]*img[:, 1]*img[:, 2]*img[:, 3] + C[:, 77]*img[:, 0]*img[:, 1]*img[:, 2]*img[:, 4] \
-               + C[:, 78]*img[:, 0]*img[:, 1]*(img[:, 3]**2) + C[:, 79]*img[:, 0]*img[:, 1]*img[:, 3]*img[:, 4] \
-               + C[:, 80]*img[:, 0]*img[:, 1]*(img[:, 4]**2) + C[:, 81]*img[:, 0]*(img[:, 2]**3) \
-               + C[:, 82]*img[:, 0]*(img[:, 2]**2)*img[:, 3] + C[:, 83]*img[:, 0]*(img[:, 2]**2)*img[:, 4] \
-               + C[:, 84]*img[:, 0]*img[:, 2]*(img[:, 3]**2) + C[:, 85]*img[:, 0]*img[:, 2]*img[:, 3]*img[:, 4] \
-               + C[:, 86]*img[:, 0]*img[:, 2]*(img[:, 4]**2) + C[:, 87]*img[:, 0]*(img[:, 3]**3) \
-               + C[:, 88]*img[:, 0]*(img[:, 3]**2)*img[:, 4] + C[:, 89]*img[:, 0]*img[:, 3]*(img[:, 4]**2) \
-               + C[:, 90]*img[:, 0]*(img[:, 4]**3) + C[:, 91]*(img[:, 1]**4) + C[:, 92]*(img[:, 1]**3)*img[:, 2] \
-               + C[:, 93]*(img[:, 1]**3)*img[:, 3] + C[:, 94]*(img[:, 1]**3)*img[:, 4] + C[:, 95]*(img[:, 1]**2)*(img[:, 2]**2) \
-               + C[:, 96]*(img[:, 1]**2)*img[:, 2]*img[:, 3] + C[:, 97]*(img[:, 1]**2)*img[:, 2]*img[:, 4] \
-               + C[:, 98]*(img[:, 1]**2)*(img[:, 3]**2) + C[:, 99]*(img[:, 1]**2)*img[:, 3]*img[:, 4] \
-               + C[:, 100]*(img[:, 1]**2)*(img[:, 4]**2) + C[:, 101]*img[:, 1]*(img[:, 2]**3) \
-               + C[:, 102]*img[:, 1]*(img[:, 2]**2)*img[:, 3] + C[:, 103]*img[:, 1]*(img[:, 2]**2)*img[:, 4] \
-               + C[:, 104]*img[:, 1]*img[:, 2]*(img[:, 3]**2) + C[:, 105]*img[:, 1]*img[:, 2]*img[:, 3]*img[:, 4] \
-               + C[:, 106]*img[:, 1]*img[:, 2]*(img[:, 4]**2) + C[:, 107]*img[:, 1]*(img[:, 3]**3) \
-               + C[:, 108]*img[:, 1]*(img[:, 3]**2)*img[:, 4] + C[:, 109]*img[:, 1]*img[:, 3]*(img[:, 4]**2) \
-               + C[:, 110]*img[:, 1]*(img[:, 4]**3) + C[:, 111]*(img[:, 2]**4) + C[:, 112]*(img[:, 2]**3)*img[:, 3] \
-               + C[:, 113]*(img[:, 2]**3)*img[:, 4] + C[:, 114]*(img[:, 2]**2)*(img[:, 3]**2) \
-               + C[:, 115]*(img[:, 2]**2)*img[:, 3]*img[:, 4] + C[:, 116]*(img[:, 2]**2)*(img[:, 4]**2) \
-               + C[:, 117]*img[:, 2]*(img[:, 3]**3) + C[:, 118]*img[:, 2]*(img[:, 3]**2)*img[:, 4] \
-               + C[:, 119]*img[:, 2]*img[:, 3]*(img[:, 4]**2) + C[:, 120]*img[:, 2]*(img[:, 4]**3) \
-               + C[:, 121]*(img[:, 3]**4) + C[:, 122]*(img[:, 3]**3)*img[:, 4] \
-               + C[:, 123]*(img[:, 3]**2)*(img[:, 4]**2) + C[:, 124]*img[:, 3]*(img[:, 4]**3) + C[:, 125]*(img[:, 4]**4)
+    def poly_terms(img_us):
+        # Generated with `ChannelPolyLayer.generate_poly_terms('img_us', 4, 5)`
+        poly_terms = torch.cat([(1.0 + img_us[:, 0] * 0.0), img_us[:, 0], img_us[:, 1], img_us[:, 2], img_us[:, 3],
+                                img_us[:, 4], (img_us[:, 0]**2), img_us[:, 0]*img_us[:, 1], img_us[:, 0]*img_us[:, 2],
+                                img_us[:, 0]*img_us[:, 3], img_us[:, 0]*img_us[:, 4], (img_us[:, 1]**2), img_us[:, 1]*img_us[:, 2],
+                                img_us[:, 1]*img_us[:, 3], img_us[:, 1]*img_us[:, 4], (img_us[:, 2]**2), img_us[:, 2]*img_us[:, 3],
+                                img_us[:, 2]*img_us[:, 4], (img_us[:, 3]**2), img_us[:, 3]*img_us[:, 4], (img_us[:, 4]**2),
+                                (img_us[:, 0]**3), (img_us[:, 0]**2)*img_us[:, 1], (img_us[:, 0]**2)*img_us[:, 2],
+                                (img_us[:, 0]**2)*img_us[:, 3], (img_us[:, 0]**2)*img_us[:, 4], img_us[:, 0]*(img_us[:, 1]**2),
+                                img_us[:, 0]*img_us[:, 1]*img_us[:, 2], img_us[:, 0]*img_us[:, 1]*img_us[:, 3],
+                                img_us[:, 0]*img_us[:, 1]*img_us[:, 4], img_us[:, 0]*(img_us[:, 2]**2),
+                                img_us[:, 0]*img_us[:, 2]*img_us[:, 3], img_us[:, 0]*img_us[:, 2]*img_us[:, 4],
+                                img_us[:, 0]*(img_us[:, 3]**2), img_us[:, 0]*img_us[:, 3]*img_us[:, 4],
+                                img_us[:, 0]*(img_us[:, 4]**2), (img_us[:, 1]**3), (img_us[:, 1]**2)*img_us[:, 2],
+                                (img_us[:, 1]**2)*img_us[:, 3], (img_us[:, 1]**2)*img_us[:, 4], img_us[:, 1]*(img_us[:, 2]**2),
+                                img_us[:, 1]*img_us[:, 2]*img_us[:, 3], img_us[:, 1]*img_us[:, 2]*img_us[:, 4],
+                                img_us[:, 1]*(img_us[:, 3]**2), img_us[:, 1]*img_us[:, 3]*img_us[:, 4],
+                                img_us[:, 1]*(img_us[:, 4]**2), (img_us[:, 2]**3), (img_us[:, 2]**2)*img_us[:, 3],
+                                (img_us[:, 2]**2)*img_us[:, 4], img_us[:, 2]*(img_us[:, 3]**2), img_us[:, 2]*img_us[:, 3]*img_us[:, 4],
+                                img_us[:, 2]*(img_us[:, 4]**2), (img_us[:, 3]**3), (img_us[:, 3]**2)*img_us[:, 4],
+                                img_us[:, 3]*(img_us[:, 4]**2), (img_us[:, 4]**3), (img_us[:, 0]**4), (img_us[:, 0]**3)*img_us[:, 1],
+                                (img_us[:, 0]**3)*img_us[:, 2], (img_us[:, 0]**3)*img_us[:, 3], (img_us[:, 0]**3)*img_us[:, 4],
+                                (img_us[:, 0]**2)*(img_us[:, 1]**2), (img_us[:, 0]**2)*img_us[:, 1]*img_us[:, 2],
+                                (img_us[:, 0]**2)*img_us[:, 1]*img_us[:, 3], (img_us[:, 0]**2)*img_us[:, 1]*img_us[:, 4],
+                                (img_us[:, 0]**2)*(img_us[:, 2]**2), (img_us[:, 0]**2)*img_us[:, 2]*img_us[:, 3],
+                                (img_us[:, 0]**2)*img_us[:, 2]*img_us[:, 4], (img_us[:, 0]**2)*(img_us[:, 3]**2),
+                                (img_us[:, 0]**2)*img_us[:, 3]*img_us[:, 4], (img_us[:, 0]**2)*(img_us[:, 4]**2),
+                                img_us[:, 0]*(img_us[:, 1]**3), img_us[:, 0]*(img_us[:, 1]**2)*img_us[:, 2],
+                                img_us[:, 0]*(img_us[:, 1]**2)*img_us[:, 3], img_us[:, 0]*(img_us[:, 1]**2)*img_us[:, 4],
+                                img_us[:, 0]*img_us[:, 1]*(img_us[:, 2]**2), img_us[:, 0]*img_us[:, 1]*img_us[:, 2]*img_us[:, 3],
+                                img_us[:, 0]*img_us[:, 1]*img_us[:, 2]*img_us[:, 4], img_us[:, 0]*img_us[:, 1]*(img_us[:, 3]**2),
+                                img_us[:, 0]*img_us[:, 1]*img_us[:, 3]*img_us[:, 4], img_us[:, 0]*img_us[:, 1]*(img_us[:, 4]**2),
+                                img_us[:, 0]*(img_us[:, 2]**3), img_us[:, 0]*(img_us[:, 2]**2)*img_us[:, 3],
+                                img_us[:, 0]*(img_us[:, 2]**2)*img_us[:, 4], img_us[:, 0]*img_us[:, 2]*(img_us[:, 3]**2),
+                                img_us[:, 0]*img_us[:, 2]*img_us[:, 3]*img_us[:, 4], img_us[:, 0]*img_us[:, 2]*(img_us[:, 4]**2),
+                                img_us[:, 0]*(img_us[:, 3]**3), img_us[:, 0]*(img_us[:, 3]**2)*img_us[:, 4], img_us[:, 0]*img_us[:, 3]*(img_us[:, 4]**2),
+                                img_us[:, 0]*(img_us[:, 4]**3), (img_us[:, 1]**4), (img_us[:, 1]**3)*img_us[:, 2], (img_us[:, 1]**3)*img_us[:, 3],
+                                (img_us[:, 1]**3)*img_us[:, 4], (img_us[:, 1]**2)*(img_us[:, 2]**2), (img_us[:, 1]**2)*img_us[:, 2]*img_us[:, 3],
+                                (img_us[:, 1]**2)*img_us[:, 2]*img_us[:, 4], (img_us[:, 1]**2)*(img_us[:, 3]**2), (img_us[:, 1]**2)*img_us[:, 3]*img_us[:, 4],
+                                (img_us[:, 1]**2)*(img_us[:, 4]**2), img_us[:, 1]*(img_us[:, 2]**3), img_us[:, 1]*(img_us[:, 2]**2)*img_us[:, 3],
+                                img_us[:, 1]*(img_us[:, 2]**2)*img_us[:, 4], img_us[:, 1]*img_us[:, 2]*(img_us[:, 3]**2),
+                                img_us[:, 1]*img_us[:, 2]*img_us[:, 3]*img_us[:, 4], img_us[:, 1]*img_us[:, 2]*(img_us[:, 4]**2),
+                                img_us[:, 1]*(img_us[:, 3]**3), img_us[:, 1]*(img_us[:, 3]**2)*img_us[:, 4],
+                                img_us[:, 1]*img_us[:, 3]*(img_us[:, 4]**2), img_us[:, 1]*(img_us[:, 4]**3), (img_us[:, 2]**4),
+                                (img_us[:, 2]**3)*img_us[:, 3], (img_us[:, 2]**3)*img_us[:, 4], (img_us[:, 2]**2)*(img_us[:, 3]**2),
+                                (img_us[:, 2]**2)*img_us[:, 3]*img_us[:, 4], (img_us[:, 2]**2)*(img_us[:, 4]**2),
+                                img_us[:, 2]*(img_us[:, 3]**3), img_us[:, 2]*(img_us[:, 3]**2)*img_us[:, 4],
+                                img_us[:, 2]*img_us[:, 3]*(img_us[:, 4]**2), img_us[:, 2]*(img_us[:, 4]**3),
+                                (img_us[:, 3]**4), (img_us[:, 3]**3)*img_us[:, 4], (img_us[:, 3]**2)*(img_us[:, 4]**2),
+                                img_us[:, 3]*(img_us[:, 4]**3), (img_us[:, 4]**4)], dim=-1)
+
+        return poly_terms
 
     def forward(self, img, coeffs):
-        # Equivalent to ChannelPolyLayer(degree=4, num_variables=5, num_out=3).forward
-        C0, C1, C2 = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
+        """
+        Equivalent to ChannelPolyLayer(degree=4, num_variables=5, num_out=3).forward
+        We just explicitly write out poly_terms for Core ML compatibility
 
-        out0 = torch.unsqueeze(Deg4MobilePolyLayer.poly(img, C0), 1)
-        out1 = torch.unsqueeze(Deg4MobilePolyLayer.poly(img, C1), 1)
-        out2 = torch.unsqueeze(Deg4MobilePolyLayer.poly(img, C2), 1)
+        Note that doing torch.cat + tensor.sum instead of using the formula generate_poly_string
+        gives us an output that is exactly equal to that of ChannelPolyLayer.forward
+        down to floating point precision. If we used the formula from generate_poly_string
+        we'd get floating point discrepancies that impact the fidelity of the output. This is
+        because tensor.sum and the + operator on tensors yield different results when summing
+        many terms down to floating point precision.
+        """
+        img_us = torch.unsqueeze(img, dim=-1)
+        poly_terms = Deg4MobilePolyLayer.poly_terms(img_us)
 
-        return torch.cat([out0, out1, out2], dim=1)
+        return (coeffs.reshape(img.shape[0], 3, 1, 1, self.num_coeffs) * \
+                torch.unsqueeze(poly_terms, dim=1)).sum(dim=-1)
 
 
 class PolyRegNet(nn.Module):
@@ -447,6 +481,8 @@ class TriSpaceRegNet(nn.Module):
         self.x = torch.nn.Parameter(self.x, requires_grad=False)
         self.y = torch.nn.Parameter(self.y, requires_grad=False)
 
+        self.final_op = self.generate_image if self.is_train else lambda img, res: res
+
     def cat_coords(self, img):
         """
         Concatenates actual coordinate values to channel dimension
@@ -456,11 +492,11 @@ class TriSpaceRegNet(nn.Module):
             "img width and height must be less than `max_resolution`, set for instance to: {}".format(self.max_resolution)
         
         zeros = img[:, 0:1] * 0.0
-        x = zeros  + self.x[:, :, :, :width]/width
-        y = zeros  + self.y[:, :, :height, :]/height
+        x = zeros + self.x[:, :, :, :width]/width
+        y = zeros + self.y[:, :, :height, :]/height
         return torch.cat([img, x, y], dim=1)
     
-    def generate_image(self, img, R, L, H):
+    def generate_residual(self, img, R, L, H):
         img_rgb = self.cat_coords(img)
         img_lab = self.cat_coords(self.rgb2lab(img))
         img_hsv = self.cat_coords(self.rgb2hsv(img))
@@ -474,10 +510,14 @@ class TriSpaceRegNet(nn.Module):
         lab_res = 2 * (lab_res - 0.5)
         hsv_res = 2 * (hsv_res - 0.5)
         
-        final_img = img + rgb_res + lab_res + hsv_res
+        residual = rgb_res + lab_res + hsv_res
 
+        return residual
+
+    @staticmethod
+    def generate_image(img, residual):
         # Without clamping we get weird artifacts when saving as image in PIL at inference time
-        return torch.clamp(final_img, 0.0, 1.0)
+        return torch.clamp(img + residual, 0.0, 1.0)
     
     def generate_coefficients(self, img, mask):
         coeffs = self.backbone(img * mask).reshape(img.shape[0], self.num_spaces, 
@@ -489,6 +529,7 @@ class TriSpaceRegNet(nn.Module):
     def forward(self, img, mask, target_img=None):
         R, L, H = self.generate_coefficients(img, mask)
         input_img = img if target_img is None else target_img
-        final_img = self.generate_image(input_img, R, L, H)
+        residual = self.generate_residual(input_img, R, L, H)
+        output = self.final_op(input_img, residual)
 
-        return final_img
+        return output
