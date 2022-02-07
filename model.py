@@ -17,19 +17,24 @@ import sys
 import torch
 import torch.nn as nn
 from collections import defaultdict
-import rgb_ted
-from util import ImageProcessing
+import metric
+import colors
+import curves
 from torch.autograd import Variable
 import math
-from math import exp
 import torch.nn.functional as F
+from torchvision import models
+import torchvision.transforms as trans
+import operator as op
+import timm
+from functools import reduce
 
 np.set_printoptions(threshold=sys.maxsize)
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class CURLLoss(nn.Module):
-
-    def __init__(self, ssim_window_size=5, alpha=0.5):
+    
+    def __init__(self, ssim_window_size=5, num_channel=1):
         """Initialisation of the DeepLPF loss function
 
         :param ssim_window_size: size of averaging window for SSIM
@@ -39,138 +44,38 @@ class CURLLoss(nn.Module):
 
         """
         super(CURLLoss, self).__init__()
-        self.alpha = alpha
         self.ssim_window_size = ssim_window_size
+        self.num_channel = num_channel
+        self.msssim_layer = metric.MSSSIMMetric(num_channel=num_channel)
+        self.rgb2lab = colors.RGB2LAB()
+        self.rgb2hsv = colors.RGB2HSV()
+    
+    def batch_lab_convert(self, img_batch):
+        converted_batch = self.rgb2lab(img_batch)
+        converted_batch = torch.clamp(converted_batch, 0.0, 1.0)
+        return converted_batch
+    
+    @staticmethod
+    def batch_L_ssim_convert(lab_img_batch):
+        return lab_img_batch[:, 0, :, :].unsqueeze(1)
+    
+    def batch_hsv_convert(self, img_batch):
+        # Batch calculate HSV values
+        img_batch_hsv = self.rgb2hsv(img_batch)
+        img_batch_hsv = torch.clamp(img_batch_hsv, 0.0, 1.0)
+                                        
+        img_batch_hue = 2*math.pi*img_batch_hsv[:, 0, :, :]
+        img_batch_val = img_batch_hsv[:, 2, :, :]
+        img_batch_sat = img_batch_hsv[:, 1, :, :]
+                                              
+        img_batch_1 = img_batch_val * img_batch_sat*torch.cos(img_batch_hue)
+        img_batch_2 = img_batch_val * img_batch_sat*torch.sin(img_batch_hue)
+                                              
+        img_batch_hsv = torch.stack((img_batch_1, img_batch_2, img_batch_val), 1)
+        return img_batch_hsv
+        
 
-    def create_window(self, window_size, num_channel):
-        """Window creation function for SSIM metric. Gaussian weights are applied to the window.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-
-        :param window_size: size of the window to compute statistics
-        :param num_channel: number of channels
-        :returns: Tensor of shape Cx1xWindow_sizexWindow_size
-        :rtype: Tensor
-
-        """
-        _1D_window = self.gaussian(window_size, 1.5).unsqueeze(1)
-        _2D_window = _1D_window.mm(
-            _1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-        window = Variable(_2D_window.expand(
-            num_channel, 1, window_size, window_size).contiguous())
-        return window
-
-    def gaussian(self, window_size, sigma):
-        """
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-        :param window_size: size of the SSIM sampling window e.g. 11
-        :param sigma: Gaussian variance
-        :returns: 1xWindow_size Tensor of Gaussian weights
-        :rtype: Tensor
-
-        """
-        gauss = torch.Tensor(
-            [exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
-        return gauss / gauss.sum()
-
-    def compute_ssim(self, img1, img2):
-        """Computes the structural similarity index between two images. This function is differentiable.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-
-        :param img1: image Tensor BxCxHxW
-        :param img2: image Tensor BxCxHxW
-        :returns: mean SSIM
-        :rtype: float
-
-        """
-        (_, num_channel, _, _) = img1.size()
-        window = self.create_window(self.ssim_window_size, num_channel)
-
-        if img1.is_cuda:
-            window = window.cuda(img1.get_device())
-            window = window.type_as(img1)
-
-        mu1 = F.conv2d(
-            img1, window, padding=self.ssim_window_size // 2, groups=num_channel)
-        mu2 = F.conv2d(
-            img2, window, padding=self.ssim_window_size // 2, groups=num_channel)
-
-        mu1_sq = mu1.pow(2)
-        mu2_sq = mu2.pow(2)
-        mu1_mu2 = mu1 * mu2
-
-        sigma1_sq = F.conv2d(
-            img1 * img1, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu1_sq
-        sigma2_sq = F.conv2d(
-            img2 * img2, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu2_sq
-        sigma12 = F.conv2d(
-            img1 * img2, window, padding=self.ssim_window_size // 2, groups=num_channel) - mu1_mu2
-
-        C1 = 0.01 ** 2
-        C2 = 0.03 ** 2
-
-        ssim_map1 = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2))
-        ssim_map2 = ((mu1_sq.cuda() + mu2_sq.cuda() + C1) *
-                     (sigma1_sq.cuda() + sigma2_sq.cuda() + C2))
-        ssim_map = ssim_map1.cuda() / ssim_map2.cuda()
-
-        v1 = 2.0 * sigma12.cuda() + C2
-        v2 = sigma1_sq.cuda() + sigma2_sq.cuda() + C2
-        cs = torch.mean(v1 / v2)
-
-        return ssim_map.mean(), cs
-
-
-    def compute_msssim(self, img1, img2):
-        """Computes the multi scale structural similarity index between two images. This function is differentiable.
-        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
-
-        :param img1: image Tensor BxCxHxW
-        :param img2: image Tensor BxCxHxW
-        :returns: mean SSIM
-        :rtype: float
-
-        """
-        if img1.shape[2]!=img2.shape[2]:
-                img1=img1.transpose(2,3)
-
-        if img1.shape != img2.shape:
-            raise RuntimeError('Input images must have the same shape (%s vs. %s).',
-                       img1.shape, img2.shape)
-        if img1.ndim != 4:
-            raise RuntimeError('Input images must have four dimensions, not %d',
-                       img1.ndim)
-
-        device = img1.device
-        weights = torch.FloatTensor([0.0448, 0.2856, 0.3001, 0.2363, 0.1333]).to(device)
-        levels = weights.size()[0]
-        ssims = []
-        mcs = []
-        for _ in range(levels):
-            ssim, cs = self.compute_ssim(img1, img2)
-
-            # Relu normalize (not compliant with original definition)
-            ssims.append(ssim)
-            mcs.append(cs)
-
-            img1 = F.avg_pool2d(img1, (2, 2))
-            img2 = F.avg_pool2d(img2, (2, 2))
-
-        ssims = torch.stack(ssims)
-        mcs = torch.stack(mcs)
-
-        # Simple normalize (not compliant with original definition)
-        # TODO: remove support for normalize == True (kept for backward support)
-        ssims = (ssims + 1) / 2
-        mcs = (mcs + 1) / 2
-
-        pow1 = mcs ** weights
-        pow2 = ssims ** weights
-
-        # From Matlab implementation https://ece.uwaterloo.ca/~z70wang/research/iwssim/
-        output = torch.prod(pow1[:-1] * pow2[-1])
-        return output
-
-    def forward(self, predicted_img_batch, target_img_batch, gradient_regulariser):
+    def forward(self, predicted_img_batch, target_img_batch, mask):
         """Forward function for the CURL loss
 
         :param predicted_img_batch_high_res: 
@@ -180,149 +85,56 @@ class CURLLoss(nn.Module):
         :rtype: float
 
         """
-        num_images = target_img_batch.shape[0]
-        target_img_batch = target_img_batch
+        # Apply mask for purposes of loss function
+        unmasked_pixels = predicted_img_batch.shape[1] * mask.sum()  # Multiply by number of channels
+        predicted_img_batch, target_img_batch = predicted_img_batch * mask, target_img_batch * mask
+        
+        rgb_loss_value = F.l1_loss(predicted_img_batch, target_img_batch, reduction='sum')/unmasked_pixels
+        
+        # Cosine similarity for #000000 (black) should be 1. Accomplishing this by
+        # finding mask values and manually setting similarity to 1. 
+        base_cos_sim = torch.nn.functional.cosine_similarity(predicted_img_batch, target_img_batch, dim=1)
+        cosine_rgb_loss_value = (1.0 - (base_cos_sim + torch.logical_not(mask)).mean(dim=(1, 2))).mean()
+        
+        target_img_batch_lab = self.batch_lab_convert(target_img_batch)
+        predicted_img_batch_lab = self.batch_lab_convert(predicted_img_batch)
+        l1_loss_value = F.l1_loss(predicted_img_batch_lab, target_img_batch_lab, reduction='sum')/unmasked_pixels
+            
+        target_img_batch_L_ssim = self.batch_L_ssim_convert(target_img_batch_lab)
+        predicted_img_batch_L_ssim = self.batch_L_ssim_convert(predicted_img_batch_lab)
+        ssim_loss_value = (1.0 - self.msssim_layer(predicted_img_batch_L_ssim , target_img_batch_L_ssim)).mean()
+        
+        target_img_batch_hsv = self.batch_hsv_convert(target_img_batch)
+        predicted_img_batch_hsv = self.batch_hsv_convert(predicted_img_batch)
+        hsv_loss_value = F.l1_loss(predicted_img_batch_hsv, target_img_batch_hsv, reduction='sum')/unmasked_pixels
 
-        ssim_loss_value = Variable(
-            torch.cuda.FloatTensor(torch.zeros(1, 1).cuda()))
-        l1_loss_value = Variable(
-            torch.cuda.FloatTensor(torch.zeros(1, 1).cuda()))
-        cosine_rgb_loss_value = Variable(
-            torch.cuda.FloatTensor(torch.zeros(1, 1).cuda()))
-        hsv_loss_value = Variable(
-            torch.cuda.FloatTensor(torch.zeros(1, 1).cuda()))
-        rgb_loss_value = Variable(
-            torch.cuda.FloatTensor(torch.zeros(1, 1).cuda()))
-
-        for i in range(0, num_images):
-
-            target_img = target_img_batch[i, :, :, :].cuda()
-            predicted_img = predicted_img_batch[i, :, :, :].cuda()
-
-            predicted_img_lab = torch.clamp(
-                ImageProcessing.rgb_to_lab(predicted_img.squeeze(0)), 0, 1)
-            target_img_lab = torch.clamp(
-                ImageProcessing.rgb_to_lab(target_img.squeeze(0)), 0, 1)
-
-            target_img_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(
-                target_img), 0, 1)
-            predicted_img_hsv = torch.clamp(ImageProcessing.rgb_to_hsv(
-                predicted_img.squeeze(0)), 0, 1)
-
-            predicted_img_hue = (predicted_img_hsv[0, :, :]*2*math.pi)
-            predicted_img_val = predicted_img_hsv[2, :, :]
-            predicted_img_sat = predicted_img_hsv[1, :, :]
-            target_img_hue = (target_img_hsv[0, :, :]*2*math.pi)
-            target_img_val = target_img_hsv[2, :, :]
-            target_img_sat = target_img_hsv[1, :, :]
-
-            target_img_L_ssim = target_img_lab[0, :, :].unsqueeze(0)
-            predicted_img_L_ssim = predicted_img_lab[0, :, :].unsqueeze(0)
-            target_img_L_ssim = target_img_L_ssim.unsqueeze(0)
-            predicted_img_L_ssim = predicted_img_L_ssim.unsqueeze(0)
-
-            ssim_value = self.compute_msssim(
-                predicted_img_L_ssim, target_img_L_ssim)
-
-            ssim_loss_value += (1.0 - ssim_value)
-
-            predicted_img_1 = predicted_img_val * \
-                predicted_img_sat*torch.cos(predicted_img_hue)
-            predicted_img_2 = predicted_img_val * \
-                predicted_img_sat*torch.sin(predicted_img_hue)
-
-            target_img_1 = target_img_val * \
-                target_img_sat*torch.cos(target_img_hue)
-            target_img_2 = target_img_val * \
-                target_img_sat*torch.sin(target_img_hue)
-
-            predicted_img_hsv = torch.stack(
-                (predicted_img_1, predicted_img_2, predicted_img_val), 2)
-            target_img_hsv = torch.stack((target_img_1, target_img_2, target_img_val), 2)
-
-            l1_loss_value += F.l1_loss(predicted_img_lab, target_img_lab)
-            rgb_loss_value += F.l1_loss(predicted_img, target_img)
-            hsv_loss_value += F.l1_loss(predicted_img_hsv, target_img_hsv)
-
-            cosine_rgb_loss_value += (1-torch.mean(
-                torch.nn.functional.cosine_similarity(predicted_img, target_img, dim=0)))
-
-        l1_loss_value = l1_loss_value/num_images
-        rgb_loss_value = rgb_loss_value/num_images
-        ssim_loss_value = ssim_loss_value/num_images
-        cosine_rgb_loss_value = cosine_rgb_loss_value/num_images
-        hsv_loss_value = hsv_loss_value/num_images
-
-        curl_loss = (rgb_loss_value + cosine_rgb_loss_value + l1_loss_value +
-                     hsv_loss_value + 10*ssim_loss_value + 1e-6*gradient_regulariser)/6
+        curl_loss = (rgb_loss_value +
+                     cosine_rgb_loss_value +
+                     l1_loss_value +
+                     hsv_loss_value +
+                     10*ssim_loss_value
+                    )/5
 
         return curl_loss
 
 
 class CURLLayer(nn.Module):
 
-    import torch.nn.functional as F
-
-    def __init__(self, num_in_channels=64, num_out_channels=64):
-        """Initialisation of class
-
-        :param num_in_channels: number of input channels
-        :param num_out_channels: number of output channels
-        :returns: N/A
-        :rtype: N/A
-
-        """
+    def __init__(self, num_lab_points=48, num_rgb_points=48, 
+                 num_hsv_points=64):
+        
         super(CURLLayer, self).__init__()
 
-        self.num_in_channels = num_in_channels
-        self.num_out_channels = num_out_channels
-        self.make_init_network()
+        self.num_lab_points = num_lab_points
+        self.num_rgb_points = num_rgb_points
+        self.num_hsv_points = num_hsv_points
+        self.rgb2lab = colors.RGB2LAB()
+        self.lab2rgb = colors.LAB2RGB()
+        self.rgb2hsv = colors.RGB2HSV()
+        self.hsv2rgb = colors.HSV2RGB()
 
-    def make_init_network(self):
-        """ Initialise the CURL block layers
 
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        self.lab_layer1 = ConvBlock(64, 64)
-        self.lab_layer2 = MaxPoolBlock()
-        self.lab_layer3 = ConvBlock(64, 64)
-        self.lab_layer4 = MaxPoolBlock()
-        self.lab_layer5 = ConvBlock(64, 64)
-        self.lab_layer6 = MaxPoolBlock()
-        self.lab_layer7 = ConvBlock(64, 64)
-        self.lab_layer8 = GlobalPoolingBlock(2)
-
-        self.fc_lab = torch.nn.Linear(64, 48)
-
-        self.dropout1 = nn.Dropout(0.5)
-        self.dropout2 = nn.Dropout(0.5)
-        self.dropout3 = nn.Dropout(0.5)
-
-        self.rgb_layer1 = ConvBlock(64, 64)
-        self.rgb_layer2 = MaxPoolBlock()
-        self.rgb_layer3 = ConvBlock(64, 64)
-        self.rgb_layer4 = MaxPoolBlock()
-        self.rgb_layer5 = ConvBlock(64, 64)
-        self.rgb_layer6 = MaxPoolBlock()
-        self.rgb_layer7 = ConvBlock(64, 64)
-        self.rgb_layer8 = GlobalPoolingBlock(2)
-
-        self.fc_rgb = torch.nn.Linear(64, 48)
-
-        self.hsv_layer1 = ConvBlock(64, 64)
-        self.hsv_layer2 = MaxPoolBlock()
-        self.hsv_layer3 = ConvBlock(64, 64)
-        self.hsv_layer4 = MaxPoolBlock()
-        self.hsv_layer5 = ConvBlock(64, 64)
-        self.hsv_layer6 = MaxPoolBlock()
-        self.hsv_layer7 = ConvBlock(64, 64)
-        self.hsv_layer8 = GlobalPoolingBlock(2)
-
-        self.fc_hsv = torch.nn.Linear(64, 64)
-
-    def forward(self, x):
+    def forward(self, img, mask, L, R, H):
         """Forward function for the CURL layer
 
         :param x: forward the data x through the network 
@@ -333,213 +145,391 @@ class CURLLayer(nn.Module):
 
         '''
         This function is where the magic happens :)
-        '''
-        x.contiguous()  # remove memory holes
+        '''        
 
-        feat = x[:, 3:64, :, :]
-        img = x[:, 0:3, :, :]
-
-        torch.cuda.empty_cache()
-        shape = x.shape
-
-        img_clamped = torch.clamp(img, 0, 1)
-        img_lab = torch.clamp(ImageProcessing.rgb_to_lab(
-            img_clamped.squeeze(0)), 0, 1)
-
-        feat_lab = torch.cat((feat, img_lab.unsqueeze(0)), 1)
-
-        x = self.lab_layer1(feat_lab)
-        del feat_lab
-        x = self.lab_layer2(x)
-        x = self.lab_layer3(x)
-        x = self.lab_layer4(x)
-        x = self.lab_layer5(x)
-        x = self.lab_layer6(x)
-        x = self.lab_layer7(x)
-        x = self.lab_layer8(x)
-        x = x.view(x.size()[0], -1)
-        x = self.dropout1(x)
-        L = self.fc_lab(x)
-
-        img_lab, gradient_regulariser_lab = ImageProcessing.adjust_lab(
-            img_lab.squeeze(0), L[0, 0:48])
-        img_rgb = ImageProcessing.lab_to_rgb(img_lab.squeeze(0))
-        img_rgb = torch.clamp(img_rgb, 0, 1)
-
-        feat_rgb = torch.cat((feat, img_rgb.unsqueeze(0)), 1)
-
-        x = self.rgb_layer1(feat_rgb)
-        x = self.rgb_layer2(x)
-        x = self.rgb_layer3(x)
-        x = self.rgb_layer4(x)
-        x = self.rgb_layer5(x)
-        x = self.rgb_layer6(x)
-        x = self.rgb_layer7(x)
-        x = self.rgb_layer8(x)
-        x = x.view(x.size()[0], -1)
-        x = self.dropout2(x)
-        R = self.fc_rgb(x)
-
-        img_rgb, gradient_regulariser_rgb = ImageProcessing.adjust_rgb(
-            img_rgb.squeeze(0), R[0, 0:48])
-        img_rgb = torch.clamp(img_rgb, 0, 1)
-
-        img_hsv = ImageProcessing.rgb_to_hsv(img_rgb.squeeze(0))
-        img_hsv = torch.clamp(img_hsv, 0, 1)
-        feat_hsv = torch.cat((feat, img_hsv.unsqueeze(0)), 1)
-
-        x = self.hsv_layer1(feat_hsv)
-        del feat_hsv
-        x = self.hsv_layer2(x)
-        x = self.hsv_layer3(x)
-        x = self.hsv_layer4(x)
-        x = self.hsv_layer5(x)
-        x = self.hsv_layer6(x)
-        x = self.hsv_layer7(x)
-        x = self.hsv_layer8(x)
-        x = x.view(x.size()[0], -1)
-        x = self.dropout3(x)
-        H = self.fc_hsv(x)
-
-        img_hsv, gradient_regulariser_hsv = ImageProcessing.adjust_hsv(
-            img_hsv, H[0, 0:64])
-        img_hsv = torch.clamp(img_hsv, 0, 1)
-
-        img_residual = torch.clamp(ImageProcessing.hsv_to_rgb(
-           img_hsv.squeeze(0)), 0, 1)
-
-        img = torch.clamp(img + img_residual.unsqueeze(0), 0, 1)
-
-        gradient_regulariser = gradient_regulariser_rgb + \
-            gradient_regulariser_lab+gradient_regulariser_hsv
+        # RGB -> LAB, modify LAB
+        img_lab = self.rgb2lab(img)
+        feat_lab = torch.cat((feat, img_lab), 1)
+        img_lab, gradient_regulariser_lab = curves.adjust_lab(img_lab, L[:, :self.num_lab_points])
+        img_lab = img_lab * mask
+        
+        # LAB -> RGB, modify RGB
+        img_rgb = self.lab2rgb(img_lab)
+        feat_rgb = torch.cat((feat, img_rgb), 1)
+        img_rgb, gradient_regulariser_rgb = curves.adjust_rgb(img_rgb, R[:, :self.num_rgb_points])
+        img_rgb = img_rgb * mask
+        
+        # RGB -> HSV, modify HSV
+        img_hsv = self.rgb2hsv(img_rgb)
+        feat_hsv = torch.cat((feat, img_hsv), 1)
+        img_hsv, gradient_regulariser_hsv = curves.adjust_hsv(img_hsv, H[:, :self.num_hsv_points])
+        img_hsv = img_hsv * mask
+        
+        # HSV -> RGB, calculate residual and final image
+        img_residual = self.hsv2rgb(img_hsv)
+        img = torch.clamp(img + img_residual, 0.0, 1.0) * mask
+        
+        gradient_regulariser = (gradient_regulariser_rgb +
+                                gradient_regulariser_lab +
+                                gradient_regulariser_hsv)
 
         return img, gradient_regulariser
+    
 
-
-class Block(nn.Module):
-
-    def __init__(self):
-        """Initialisation for a lower-level DeepLPF conv block
-
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        super(Block, self).__init__()
-
-    def conv3x3(self, in_channels, out_channels, stride=1):
-        """Represents a convolution of shape 3x3
-
-        :param in_channels: number of input channels
-        :param out_channels: number of output channels
-        :param stride: the convolution stride
-        :returns: convolution function with the specified parameterisation
-        :rtype: function
-
-        """
-        return nn.Conv2d(in_channels, out_channels, kernel_size=3,
-                         stride=stride, padding=1, bias=True)
-
-
-class ConvBlock(Block, nn.Module):
-
-    def __init__(self, num_in_channels, num_out_channels, stride=1):
-        """Initialise function for the higher level convolution block
-
-        :param in_channels:
-        :param out_channels:
-        :param stride:
-        :param padding:
-        :returns:
-        :rtype:
-
-        """
-        super(Block, self).__init__()
-        self.conv = self.conv3x3(num_in_channels, num_out_channels, stride=2)
-        self.lrelu = nn.LeakyReLU()
-
-    def forward(self, x):
-        """ Forward function for the higher level convolution block
-
-        :param x: Tensor representing the input BxCxWxH, where B is the batch size, C is the number of channels, W and H are the width and image height
-        :returns: Tensor representing the output of the block
-        :rtype: Tensor
-
-        """
-        img_out = self.lrelu(self.conv(x))
-        return img_out
-
-
-class MaxPoolBlock(Block, nn.Module):
-
-    def __init__(self):
-        """Initialise function for the max pooling block
-
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        super(Block, self).__init__()
-
-        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
-
-    def forward(self, x):
-        """ Forward function for the max pooling block
-
-        :param x: Tensor representing the input BxCxWxH, where B is the batch size, C is the number of channels, W and H are the width and image height
-        :returns: Tensor representing the output of the block
-        :rtype: Tensor
-
-        """
-        img_out = self.max_pool(x)
-        return img_out
-
-
-class GlobalPoolingBlock(Block, nn.Module):
-
-    def __init__(self, receptive_field):
-        """Implementation of the global pooling block. Takes the average over a 2D receptive field.
-        :param receptive_field:
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        super(Block, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-
-    def forward(self, x):
-        """Forward function for the high-level global pooling block
-
-        :param x: Tensor of shape BxCxAxA
-        :returns: Tensor of shape BxCx1x1, where B is the batch size
-        :rtype: Tensor
-
-        """
-        out = self.avg_pool(x)
-        return out
-
-
-class CURLNet(nn.Module):
-
-    def __init__(self):
-        """Initialisation function
-
-        :returns: initialises parameters of the neural networ
-        :rtype: N/A
-
-        """
-        super(CURLNet, self).__init__()
-        self.tednet = rgb_ted.TEDModel()
-        self.curllayer = CURLLayer()
-
-    def forward(self, img):
-        """Neural network forward function
-
-        :param img: forward the data img through the network
-        :returns: residual image
-        :rtype: numpy ndarray
-
-        """
-        feat = self.tednet(img)
-        img, gradient_regulariser = self.curllayer(feat)
+class GCURLNet(nn.Module):
+        
+    def __init__(self, num_lab_points=48, num_rgb_points=48, num_hsv_points=64):
+        super(GCURLNet, self).__init__()
+        self.num_lab_points = num_lab_points
+        self.num_rgb_points = num_rgb_points
+        self.num_hsv_points = num_hsv_points
+        self.curve_break_1 = num_lab_points
+        self.curve_break_2 = num_lab_points + num_rgb_points
+        
+        self.backbone = timm.create_model('efficientnetv2_rw_s', pretrained=True)
+        self.backbone.classifier = nn.Sequential(nn.Linear(in_features=1792, 
+                                                           out_features=self.num_spaces*self.num_channels*self.num_coeffs)
+                                               )
+        self.curllayer = CURLLayer(self.num_lab_points, self.num_rgb_points, self.num_hsv_points)
+    
+    def forward(self, img, mask, L, R, H):
+        curves = self.backbone(img)
+        L, R, H = curves[:, :self.curve_break_1], \
+                  curves[:, self.curve_break_1:self.curve_break_2], \
+                  curves[:, self.curve_break_2:]
+        
+        img, gradient_regulariser = self.curllayer(img, mask, L, R, H)
+    
         return img, gradient_regulariser
+
+        
+class ChannelPolyLayer(nn.Module):
+    
+    def __init__(self, degree=3, num_variables=3, num_out=None):
+        assert degree >= 0 and type(degree) == int, "`degree` must be non-negative integer"
+        assert num_variables >= 0 and type(num_variables) == int, "`num_variables` must be non-negative integer"
+        
+        super(ChannelPolyLayer, self).__init__()
+        self.degree = degree
+        self.num_variables = num_variables
+        self.num_out = self.num_variables if num_out is None else num_out
+        self.num_coeffs = ChannelPolyLayer.ncr(num_variables + degree, degree)
+        self.powers = nn.Parameter(torch.Tensor(list(ChannelPolyLayer.generate_powers(degree, num_variables))),
+                                   requires_grad=False)
+        
+        assert self.powers.shape[0] == self.num_coeffs,\
+            "Number of coefficients and powers should match"
+     
+    @staticmethod
+    def generate_powers(order, n_variables):
+        """
+        Find the exponents of a multivariate polynomial expression of order
+        `order` and `n_variable` number of variables.
+        From: https://stackoverflow.com/questions/4913902/optimize-generator-for-multivariate-polynomial-exponents
+        """
+        pattern = [0] * n_variables
+        yield tuple(pattern)
+        for current_sum in range(1, order+1):
+            pattern[0] = current_sum
+            yield tuple(pattern)
+            while pattern[-1] < current_sum:
+                for i in range(2, n_variables + 1):
+                    if 0 < pattern[n_variables - i]:
+                        pattern[n_variables - i] -= 1
+                        if 2 < i:
+                            pattern[n_variables - i + 1] = 1 + pattern[-1]
+                            pattern[-1] = 0
+                        else:
+                            pattern[-1] += 1
+                        break
+                yield tuple(pattern)
+            pattern[-1] = 0
+
+    @staticmethod
+    def generate_poly_string(img_name, coeff_name, order, n_variables):
+        poly_terms = []
+
+        for term_num, powers in enumerate(ChannelPolyLayer.generate_powers(order, n_variables)):
+            poly_terms.append('{}[:, {}]'.format(coeff_name, term_num))
+            for idx, power in enumerate(powers):
+                if power == 0:
+                    continue
+                elif power == 1:
+                    poly_terms[term_num] += "*{}[:, {}]".format(img_name, idx)
+                else:
+                    poly_terms[term_num] += "*({}[:, {}]**{})".format(img_name, idx, power)
+
+        return ' + '.join(poly_terms)
+
+    @staticmethod
+    def generate_poly_terms(img_us_name, order, n_variables):
+        poly_terms = []
+
+        for term_num, powers in enumerate(ChannelPolyLayer.generate_powers(order, n_variables)):
+            monomials = []
+
+            for idx, power in enumerate(powers):
+                if power == 0:
+                    continue
+                elif power == 1:
+                    monomials.append("{}[:, {}]".format(img_us_name, idx))
+                else:
+                    monomials.append("({}[:, {}]**{})".format(img_us_name, idx, power))
+
+            if len(monomials) == 0:
+                poly_term = '(1.0 + {}[:, 0] * 0.0)'.format(img_us_name)
+            else:
+                poly_term = '*'.join(monomials)
+
+            poly_terms.append(poly_term)
+
+        return 'torch.cat([' + ', '.join(poly_terms) + '], dim=-1)'
+
+    @staticmethod
+    def ncr(n, r):
+        r = min(r, n-r)
+        numer = reduce(op.mul, range(n, n-r, -1), 1)
+        denom = reduce(op.mul, range(1, r+1), 1)
+        return numer // denom  # or / in Python 2
+        
+    def forward(self, img, coeffs):
+        assert img.shape[1] == self.num_variables, \
+        "There should be a polynomial variable per channel"
+        assert coeffs.shape[2] == self.num_coeffs,\
+            "For degree {} and number of variables {} the number of required " \
+            "coefficients (coeffs.shape[1]) is {}".format(degree, num_variables, self.num_coeffs)
+        assert len(coeffs.shape) == 3,\
+            "Coefficients be 2D tensor of shape (batch size, num coefficients)"
+        
+        """
+        Dims (batch size, out channels, x, y, num coeffs)
+        Creates polynomial terms, e.g. for degree 3 polynomial with
+        2 variables polynomial_terms.shape[-1] equals 10 with the 
+        the last dimension of this tensor equal to 
+        (1, x, y, x^2, xy, y^2, x^3, x^2y^1, x^1y^2, y^3)
+        Note that in our case our polynomial has variables equal to
+        the number of channels/colors in the image, so x, y here should
+        not be interpreted as spatial coordinates.
+        
+        Note we can have different input channels `self.num_variables`
+        and output channels `self.num_out`. This allows us to for example
+        output 3 color channels from a 5 dimensional image input where 3
+        channels are colors and the other 2 are spatial coordinates.
+        """
+        img_us = torch.unsqueeze(img, dim=0)
+        pwrs_rs = self.powers.reshape(self.num_coeffs, 1, self.num_variables, 1, 1)
+        poly_terms = torch.permute(torch.pow(img_us, pwrs_rs), [1, 2, 3, 4, 0]).prod(dim=1)
+        
+        """
+        Dims (batch size, out channels, x, y)
+        Continuing the example above, we take the polynomial terms,
+        multiply by their learned coefficients, and sum to get
+        a + bx + cy dx^2 + exy + fy^2 + gx^3 + hx^2y^1 + ix^1y^2 + jy^3)
+        where coeffs is the tensor containing the predicted 
+        (a, b, c, d, e, f, g, h, i, j) for each image in the minibatch.
+        """
+        
+        return (coeffs.reshape(img.shape[0], self.num_out, 1, 1, self.num_coeffs) * \
+                torch.unsqueeze(poly_terms, dim=1)).sum(dim=-1)
+
+
+class Deg4MobilePolyLayer(nn.Module):
+
+    def __init__(self):
+        super(Deg4MobilePolyLayer, self).__init__()
+        self.num_coeffs = 126
+        # Need to be able to load state from ChannelPolyLayer
+        self.powers = nn.Parameter(torch.Tensor(list(ChannelPolyLayer.generate_powers(4, 5))),
+                                   requires_grad=False)
+
+    @staticmethod
+    def poly_terms(img_us):
+        # Generated with `ChannelPolyLayer.generate_poly_terms('img_us', 4, 5)`
+        poly_terms = torch.cat([(1.0 + img_us[:, 0] * 0.0), img_us[:, 0], img_us[:, 1], img_us[:, 2], img_us[:, 3],
+                                img_us[:, 4], (img_us[:, 0]**2), img_us[:, 0]*img_us[:, 1], img_us[:, 0]*img_us[:, 2],
+                                img_us[:, 0]*img_us[:, 3], img_us[:, 0]*img_us[:, 4], (img_us[:, 1]**2), img_us[:, 1]*img_us[:, 2],
+                                img_us[:, 1]*img_us[:, 3], img_us[:, 1]*img_us[:, 4], (img_us[:, 2]**2), img_us[:, 2]*img_us[:, 3],
+                                img_us[:, 2]*img_us[:, 4], (img_us[:, 3]**2), img_us[:, 3]*img_us[:, 4], (img_us[:, 4]**2),
+                                (img_us[:, 0]**3), (img_us[:, 0]**2)*img_us[:, 1], (img_us[:, 0]**2)*img_us[:, 2],
+                                (img_us[:, 0]**2)*img_us[:, 3], (img_us[:, 0]**2)*img_us[:, 4], img_us[:, 0]*(img_us[:, 1]**2),
+                                img_us[:, 0]*img_us[:, 1]*img_us[:, 2], img_us[:, 0]*img_us[:, 1]*img_us[:, 3],
+                                img_us[:, 0]*img_us[:, 1]*img_us[:, 4], img_us[:, 0]*(img_us[:, 2]**2),
+                                img_us[:, 0]*img_us[:, 2]*img_us[:, 3], img_us[:, 0]*img_us[:, 2]*img_us[:, 4],
+                                img_us[:, 0]*(img_us[:, 3]**2), img_us[:, 0]*img_us[:, 3]*img_us[:, 4],
+                                img_us[:, 0]*(img_us[:, 4]**2), (img_us[:, 1]**3), (img_us[:, 1]**2)*img_us[:, 2],
+                                (img_us[:, 1]**2)*img_us[:, 3], (img_us[:, 1]**2)*img_us[:, 4], img_us[:, 1]*(img_us[:, 2]**2),
+                                img_us[:, 1]*img_us[:, 2]*img_us[:, 3], img_us[:, 1]*img_us[:, 2]*img_us[:, 4],
+                                img_us[:, 1]*(img_us[:, 3]**2), img_us[:, 1]*img_us[:, 3]*img_us[:, 4],
+                                img_us[:, 1]*(img_us[:, 4]**2), (img_us[:, 2]**3), (img_us[:, 2]**2)*img_us[:, 3],
+                                (img_us[:, 2]**2)*img_us[:, 4], img_us[:, 2]*(img_us[:, 3]**2), img_us[:, 2]*img_us[:, 3]*img_us[:, 4],
+                                img_us[:, 2]*(img_us[:, 4]**2), (img_us[:, 3]**3), (img_us[:, 3]**2)*img_us[:, 4],
+                                img_us[:, 3]*(img_us[:, 4]**2), (img_us[:, 4]**3), (img_us[:, 0]**4), (img_us[:, 0]**3)*img_us[:, 1],
+                                (img_us[:, 0]**3)*img_us[:, 2], (img_us[:, 0]**3)*img_us[:, 3], (img_us[:, 0]**3)*img_us[:, 4],
+                                (img_us[:, 0]**2)*(img_us[:, 1]**2), (img_us[:, 0]**2)*img_us[:, 1]*img_us[:, 2],
+                                (img_us[:, 0]**2)*img_us[:, 1]*img_us[:, 3], (img_us[:, 0]**2)*img_us[:, 1]*img_us[:, 4],
+                                (img_us[:, 0]**2)*(img_us[:, 2]**2), (img_us[:, 0]**2)*img_us[:, 2]*img_us[:, 3],
+                                (img_us[:, 0]**2)*img_us[:, 2]*img_us[:, 4], (img_us[:, 0]**2)*(img_us[:, 3]**2),
+                                (img_us[:, 0]**2)*img_us[:, 3]*img_us[:, 4], (img_us[:, 0]**2)*(img_us[:, 4]**2),
+                                img_us[:, 0]*(img_us[:, 1]**3), img_us[:, 0]*(img_us[:, 1]**2)*img_us[:, 2],
+                                img_us[:, 0]*(img_us[:, 1]**2)*img_us[:, 3], img_us[:, 0]*(img_us[:, 1]**2)*img_us[:, 4],
+                                img_us[:, 0]*img_us[:, 1]*(img_us[:, 2]**2), img_us[:, 0]*img_us[:, 1]*img_us[:, 2]*img_us[:, 3],
+                                img_us[:, 0]*img_us[:, 1]*img_us[:, 2]*img_us[:, 4], img_us[:, 0]*img_us[:, 1]*(img_us[:, 3]**2),
+                                img_us[:, 0]*img_us[:, 1]*img_us[:, 3]*img_us[:, 4], img_us[:, 0]*img_us[:, 1]*(img_us[:, 4]**2),
+                                img_us[:, 0]*(img_us[:, 2]**3), img_us[:, 0]*(img_us[:, 2]**2)*img_us[:, 3],
+                                img_us[:, 0]*(img_us[:, 2]**2)*img_us[:, 4], img_us[:, 0]*img_us[:, 2]*(img_us[:, 3]**2),
+                                img_us[:, 0]*img_us[:, 2]*img_us[:, 3]*img_us[:, 4], img_us[:, 0]*img_us[:, 2]*(img_us[:, 4]**2),
+                                img_us[:, 0]*(img_us[:, 3]**3), img_us[:, 0]*(img_us[:, 3]**2)*img_us[:, 4], img_us[:, 0]*img_us[:, 3]*(img_us[:, 4]**2),
+                                img_us[:, 0]*(img_us[:, 4]**3), (img_us[:, 1]**4), (img_us[:, 1]**3)*img_us[:, 2], (img_us[:, 1]**3)*img_us[:, 3],
+                                (img_us[:, 1]**3)*img_us[:, 4], (img_us[:, 1]**2)*(img_us[:, 2]**2), (img_us[:, 1]**2)*img_us[:, 2]*img_us[:, 3],
+                                (img_us[:, 1]**2)*img_us[:, 2]*img_us[:, 4], (img_us[:, 1]**2)*(img_us[:, 3]**2), (img_us[:, 1]**2)*img_us[:, 3]*img_us[:, 4],
+                                (img_us[:, 1]**2)*(img_us[:, 4]**2), img_us[:, 1]*(img_us[:, 2]**3), img_us[:, 1]*(img_us[:, 2]**2)*img_us[:, 3],
+                                img_us[:, 1]*(img_us[:, 2]**2)*img_us[:, 4], img_us[:, 1]*img_us[:, 2]*(img_us[:, 3]**2),
+                                img_us[:, 1]*img_us[:, 2]*img_us[:, 3]*img_us[:, 4], img_us[:, 1]*img_us[:, 2]*(img_us[:, 4]**2),
+                                img_us[:, 1]*(img_us[:, 3]**3), img_us[:, 1]*(img_us[:, 3]**2)*img_us[:, 4],
+                                img_us[:, 1]*img_us[:, 3]*(img_us[:, 4]**2), img_us[:, 1]*(img_us[:, 4]**3), (img_us[:, 2]**4),
+                                (img_us[:, 2]**3)*img_us[:, 3], (img_us[:, 2]**3)*img_us[:, 4], (img_us[:, 2]**2)*(img_us[:, 3]**2),
+                                (img_us[:, 2]**2)*img_us[:, 3]*img_us[:, 4], (img_us[:, 2]**2)*(img_us[:, 4]**2),
+                                img_us[:, 2]*(img_us[:, 3]**3), img_us[:, 2]*(img_us[:, 3]**2)*img_us[:, 4],
+                                img_us[:, 2]*img_us[:, 3]*(img_us[:, 4]**2), img_us[:, 2]*(img_us[:, 4]**3),
+                                (img_us[:, 3]**4), (img_us[:, 3]**3)*img_us[:, 4], (img_us[:, 3]**2)*(img_us[:, 4]**2),
+                                img_us[:, 3]*(img_us[:, 4]**3), (img_us[:, 4]**4)], dim=-1)
+
+        return poly_terms
+
+    def forward(self, img, coeffs):
+        """
+        Equivalent to ChannelPolyLayer(degree=4, num_variables=5, num_out=3).forward
+        We just explicitly write out poly_terms for Core ML compatibility
+
+        Note that doing torch.cat + tensor.sum instead of using the formula generate_poly_string
+        gives us an output that is exactly equal to that of ChannelPolyLayer.forward
+        down to floating point precision. If we used the formula from generate_poly_string
+        we'd get floating point discrepancies that impact the fidelity of the output. This is
+        because tensor.sum and the + operator on tensors yield different results when summing
+        many terms down to floating point precision.
+        """
+        img_us = torch.unsqueeze(img, dim=-1)
+        poly_terms = Deg4MobilePolyLayer.poly_terms(img_us)
+
+        return (coeffs.reshape(img.shape[0], 3, 1, 1, self.num_coeffs) * \
+                torch.unsqueeze(poly_terms, dim=1)).sum(dim=-1)
+
+
+class PolyRegNet(nn.Module):
+    
+    def __init__(self, num_channels=3, polynomial_order=4):
+        super(PolyRegNet, self).__init__()
+        self.num_channels = num_channels
+        self.order = polynomial_order
+        self.polylayer = ChannelPolyLayer(degree=self.order, num_variables=self.num_channels)
+        self.num_coeffs = self.polylayer.num_coeffs
+        
+        self.backbone = timm.create_model('efficientnetv2_rw_s', pretrained=True)
+        self.backbone.classifier = nn.Linear(in_features=1792, 
+                                             out_features=self.num_channels*self.num_coeffs)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self, img, mask):
+        coeffs = self.backbone(img).reshape(img.shape[0], self.num_channels, self.num_coeffs)
+        final_img = self.sigmoid(self.polylayer(img, coeffs)) * mask
+        
+        return final_img
+    
+
+class TriSpaceRegNet(nn.Module):
+    
+    def __init__(self, polynomial_order=4, spatial=False, 
+                 max_resolution=10000, is_train=True,
+                 use_sync_bn=False, polylayer=None):
+        super(TriSpaceRegNet, self).__init__()
+        self.num_channels = 3
+        self.num_spaces = 3
+        self.num_in = self.num_channels + 2 * spatial
+        self.order = polynomial_order
+        self.is_train = is_train
+        self.max_resolution = max_resolution
+        self.polylayer = polylayer if polylayer is not None else ChannelPolyLayer(degree=self.order,
+                                                                                  num_variables=self.num_in,
+                                                                                  num_out=self.num_channels)
+        self.num_coeffs = self.polylayer.num_coeffs
+
+        self.backbone = timm.create_model('efficientnetv2_rw_t', pretrained=True)
+        if use_sync_bn:
+            self.backbone = nn.SyncBatchNorm.convert_sync_batchnorm(self.backbone)
+        self.backbone.classifier = nn.Sequential(nn.Linear(in_features=1024, out_features=1024), # 1280 in for b0
+                                                 nn.Linear(in_features=1024, out_features=512),
+                                                 nn.Linear(in_features=512, out_features=512),
+                                                 nn.Linear(in_features=512, out_features=self.num_spaces*self.num_channels*self.num_coeffs)
+                                               )
+        self.rgb2lab = colors.RGB2LAB()
+        self.lab2rgb = colors.LAB2RGB()
+        self.rgb2hsv = colors.RGB2HSV()
+        self.hsv2rgb = colors.HSV2RGB()
+        
+        self.sigmoid = nn.Sigmoid()
+        
+        # We found that making the properties parameter values conditional agrees with
+        # DataParallel, but if we rely on pointing methods instead of objects DataParallel
+        # doesn't like that when the method uses parameters.
+        if not spatial:
+            self.x = torch.zeros(1, 0, 1, self.max_resolution)
+            self.y = torch.zeros(1, 0, self.max_resolution, 1)
+        else:
+            self.x = torch.arange(0, self.max_resolution).reshape(1, 1, 1, self.max_resolution)
+            self.y = torch.arange(0, self.max_resolution).reshape(1, 1, self.max_resolution, 1)
+            
+        self.x = torch.nn.Parameter(self.x, requires_grad=False)
+        self.y = torch.nn.Parameter(self.y, requires_grad=False)
+
+        self.final_op = self.generate_image if self.is_train else lambda img, res: res
+
+    def cat_coords(self, img):
+        """
+        Concatenates actual coordinate values to channel dimension
+        """
+        batch_size, channels, height, width = img.shape
+        assert height <= self.max_resolution and width <= self.max_resolution, \
+            "img width and height must be less than `max_resolution`, set for instance to: {}".format(self.max_resolution)
+        
+        zeros = img[:, 0:1] * 0.0
+        x = zeros + self.x[:, :, :, :width]/width
+        y = zeros + self.y[:, :, :height, :]/height
+        return torch.cat([img, x, y], dim=1)
+    
+    def generate_residual(self, img, R, L, H):
+        img_rgb = self.cat_coords(img)
+        img_lab = self.cat_coords(self.rgb2lab(img))
+        img_hsv = self.cat_coords(self.rgb2hsv(img))
+        
+        rgb_res = self.sigmoid(self.polylayer(img_rgb, R))
+        lab_res = self.lab2rgb(self.sigmoid(self.polylayer(img_lab, L)))
+        hsv_res = self.hsv2rgb(self.sigmoid(self.polylayer(img_hsv, H)))
+        
+        # Modify all pixels
+        rgb_res = 2 * (rgb_res - 0.5)
+        lab_res = 2 * (lab_res - 0.5)
+        hsv_res = 2 * (hsv_res - 0.5)
+        
+        residual = rgb_res + lab_res + hsv_res
+
+        return residual
+
+    @staticmethod
+    def generate_image(img, residual):
+        # Without clamping we get weird artifacts when saving as image in PIL at inference time
+        return torch.clamp(img + residual, 0.0, 1.0)
+    
+    def generate_coefficients(self, img, mask):
+        coeffs = self.backbone(img * mask).reshape(img.shape[0], self.num_spaces, 
+                                                   self.num_channels, self.num_coeffs)
+        
+        R, L, H = coeffs[:, 0], coeffs[:, 1], coeffs[:, 2]
+        return R, L, H
+    
+    def forward(self, img, mask, target_img=None):
+        R, L, H = self.generate_coefficients(img, mask)
+        input_img = img if target_img is None else target_img
+        residual = self.generate_residual(input_img, R, L, H)
+        output = self.final_op(input_img, residual)
+
+        return output

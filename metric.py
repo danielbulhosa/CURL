@@ -7,155 +7,206 @@ Please cite paper if you use this code.
 
 Tested with Pytorch 1.7.1, Python 3.7.9
 
-Authors: Sean Moran (sean.j.moran@gmail.com), 2020
+Authors: Sean Moran (sean.j.moran@gmail.com), 
 
 '''
-import matplotlib
-matplotlib.use('agg')
+from PIL import Image
+import math
+import torch.nn.functional as F
 import numpy as np
-import sys
-import os
-import torch
-import logging
 from torch.autograd import Variable
-from util import ImageProcessing
-import matplotlib.pyplot as plt
-
+import torch.cuda.comm
+import torch
+from math import exp
+import matplotlib
+import sys
+import torch.nn as nn
+matplotlib.use('agg')
 np.set_printoptions(threshold=sys.maxsize)
 
-class Evaluator():
 
-    def __init__(self, criterion, data_loader, split_name, log_dirpath):
-        """Initialisation function for the data loader
-        :param data_dirpath: directory containing the data
-        :param img_ids_filepath: file containing the ids of the images to load
-        :returns: N/A
-        :rtype: N/A
-        """
-        super().__init__()
-        self.criterion = criterion
-        self.data_loader = data_loader
-        self.split_name = split_name
-        self.log_dirpath = log_dirpath
+class PSNRMetric(nn.Module):
+    
+    def __init__(self, max_intensity=1.0):
+        super(PSNRMetric, self).__init__()
+        self.max_intensity = max_intensity
 
-    def evaluate(self, net, epoch=0):
-        """Evaluates a network on a specified split of a dataset e.g. test, validation
-        :param net: PyTorch neural network data structure
-        :param data_loader: an instance of the DataLoader class for the dataset of interest
-        :param split_name: name of the split e.g. "test", "validation"
-        :param log_dirpath: logging directory
-        :returns: average loss, average PSNR
-        :rtype: float, float
+    @staticmethod
+    def compute_mse(original_batch, result_batch, mask):
+        """Computes the mean squared error between to RGB images represented as multi-dimensional numpy arrays.
+
+        :param original: input RGB image as a numpy array
+        :param result: target RGB image as a numpy array
+        :returns: the mean squared error between the input and target images
+        :rtype: float
+
         """
+        original_batch, result_batch = original_batch * mask, result_batch * mask
+        # Multiply number of unmasked pixels by number of channels
+        unmasked_pixels = original_batch.shape[1] * torch.squeeze(mask, dim=1).sum(dim=(1,2))
+        return ((original_batch - result_batch) ** 2).sum(dim=(1,2,3))/unmasked_pixels
+
+    @staticmethod
+    def compute_psnr(image_batchA, image_batchB, mask_batch, max_intensity=1.0):
+        """Computes the PSNR for a batch of input and output images
+
+        :param image_batchA: numpy nd-array representing the image batch A of shape Bx3xWxH
+        :param image_batchB: numpy nd-array representing the image batch A of shape Bx3xWxH
+        :param max_intensity: maximum intensity possible in the image (e.g. 255)
+        :returns: average PSNR for the batch of images
+        :rtype: float
+
+        """        
+        image_batchA, image_batchB = torch.clamp(image_batchA, 0.0, 1.0), \
+                                     torch.clamp(image_batchB, 0.0, 1.0)
+        # Calculate PSNR per image
+        psnr_val = 10 * torch.log10(max_intensity ** 2 /
+                                    PSNRMetric.compute_mse(image_batchA, image_batchB, mask_batch))
+
+        # Take average over batch dimension, ignoring NaNs
+        psnr_mean = psnr_val.nanmean()
+        return psnr_mean if not psnr_mean.isnan() else None
+    
+    def forward(self, image_batchA, image_batchB, mask_batch):
+        return PSNRMetric.compute_psnr(image_batchA, image_batchB, 
+                                       mask_batch, max_intensity=self.max_intensity)
+
+
+class MSSSIMMetric(nn.Module):
+    def __init__(self, window_size=11, num_channel=3):
+        super(MSSSIMMetric, self).__init__()
+        self.msssim_weights = nn.Parameter(torch.FloatTensor([0.0448, 0.2856, 0.3001, 0.2363, 0.1333]), 
+                                           requires_grad=False)
+        self.levels = self.msssim_weights.size()[0]
         
-        psnr_avg = 0.0
-        ssim_avg = 0.0
-        examples = 0
-        running_loss = 0
-        num_batches = 0
-        batch_size = 1
+        # Default values for ssim methods
+        self.window_size = window_size
+        self.num_channel = num_channel
+        self.gaussian_window = MSSSIMMetric.create_window(self.window_size, self.num_channel)
 
-        out_dirpath = self.log_dirpath + "/" + self.split_name.lower()
-        if not os.path.isdir(out_dirpath):
-            os.mkdir(out_dirpath)
+    @staticmethod
+    def create_window(window_size, num_channel):
+        """Window creation function for SSIM metric. Gaussian weights are applied to the window.
+        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
 
-        # switch model to evaluation mode
-        net.eval()
-        net.cuda()
+        :param window_size: size of the window to compute statistics
+        :param num_channel: number of channels
+        :returns: Tensor of shape Cx1xWindow_sizexWindow_size
+        :rtype: Tensor
 
-        with torch.no_grad():
+        """
+        _1D_window = MSSSIMMetric.gaussian(window_size, 1.5).unsqueeze(1)
+        _2D_window = _1D_window.mm(
+            _1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+        window = Variable(_2D_window.expand(
+            num_channel, 1, window_size, window_size).contiguous())
+        return window
 
-            for batch_num, data in enumerate(self.data_loader, 0):
+    @staticmethod
+    def gaussian(window_size, sigma):
+        """
+        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
+        :param window_size: size of the SSIM sampling window e.g. 11
+        :param sigma: Gaussian variance
+        :returns: 1xWindow_size Tensor of Gaussian weights
+        :rtype: Tensor
 
-                input_img_batch, output_img_batch, name = Variable(data['input_img'], requires_grad=False).cuda(), Variable(data['output_img'],
-                                                                                                   requires_grad=False).cuda(), data['name']
-                input_img_batch = input_img_batch.unsqueeze(0)
+        """
+        gauss = torch.Tensor(
+            [exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)]).cuda()
+        return gauss / gauss.sum()
 
-                for i in range(0, input_img_batch.shape[0]):
+    def compute_ssim(self, img1, img2):
+        """Computes the structural similarity index between two images. This function is differentiable.
+        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
+        Note ssim does not assume a color space (https://arxiv.org/pdf/2006.13846.pdf)
 
-                    img = input_img_batch[i, :, :, :]
-                    img = torch.clamp(img, 0, 1)
+        :param img1: image Tensor BxCxHxW
+        :param img2: image Tensor BxCxHxW
+        :returns: mean SSIM
+        :rtype: float
 
-                    net_output_img_example ,_= net(img)
+        """
+        window = self.gaussian_window.type_as(img1)
 
-                    if net_output_img_example.shape[2]!=output_img_batch.shape[2]:
-                        net_output_img_example=net_output_img_example.transpose(2,3)
+        mu1 = F.conv2d(
+            img1, window, padding=self.window_size // 2, groups=self.num_channel)
+        mu2 = F.conv2d(
+            img2, window, padding=self.window_size // 2, groups=self.num_channel)
 
-                    loss = self.criterion(net_output_img_example[:, 0:3, :, :],
-                                          output_img_batch[:, 0:3, :, :],0)
+        mu1_sq = mu1.pow(2)
+        mu2_sq = mu2.pow(2)
+        mu1_mu2 = mu1 * mu2
 
-                    input_img_example = (input_img_batch.cpu(
-                    ).data[0, 0:3, :, :].numpy() * 255).astype('uint8')
+        sigma1_sq = F.conv2d(
+            img1 * img1, window, padding=self.window_size // 2, groups=self.num_channel) - mu1_sq
+        sigma2_sq = F.conv2d(
+            img2 * img2, window, padding=self.window_size // 2, groups=self.num_channel) - mu2_sq
+        sigma12 = F.conv2d(
+            img1 * img2, window, padding=self.window_size // 2, groups=self.num_channel) - mu1_mu2
 
-                    output_img_batch_numpy = output_img_batch.squeeze(
-                        0).data.cpu().numpy()
-                    output_img_batch_numpy = ImageProcessing.swapimdims_3HW_HW3(
-                        output_img_batch_numpy)
-                    output_img_batch_rgb = output_img_batch_numpy
-                    output_img_batch_rgb = ImageProcessing.swapimdims_HW3_3HW(
-                        output_img_batch_rgb)
-                    output_img_batch_rgb = np.expand_dims(
-                        output_img_batch_rgb, axis=0)
+        C1 = 0.01 ** 2
+        C2 = 0.03 ** 2
 
-                    net_output_img_example_numpy = net_output_img_example.squeeze(
-                        0).data.cpu().numpy()
-                    net_output_img_example_numpy = ImageProcessing.swapimdims_3HW_HW3(
-                        net_output_img_example_numpy)
-                    net_output_img_example_rgb = net_output_img_example_numpy
-                    net_output_img_example_rgb = ImageProcessing.swapimdims_HW3_3HW(
-                        net_output_img_example_rgb)
-                    net_output_img_example_rgb = np.expand_dims(
-                        net_output_img_example_rgb, axis=0)
-                    net_output_img_example_rgb = np.clip(
-                        net_output_img_example_rgb, 0, 1)
+        ssim_map1 = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2))
+        ssim_map2 = ((mu1_sq.cuda() + mu2_sq.cuda() + C1) *
+                     (sigma1_sq.cuda() + sigma2_sq.cuda() + C2))
+        ssim_map = ssim_map1.cuda() / ssim_map2.cuda()
 
-                    running_loss += loss.data[0]
-                    examples += batch_size
-                    num_batches += 1
+        v1 = 2.0 * sigma12.cuda() + C2
+        v2 = sigma1_sq.cuda() + sigma2_sq.cuda() + C2
+        cs = torch.mean(v1 / v2, dim=(1, 2, 3))
 
-                    psnr_example = ImageProcessing.compute_psnr(output_img_batch_rgb.astype(np.float32),
-                                                                net_output_img_example_rgb.astype(np.float32), 1.0)
-                    ssim_example = ImageProcessing.compute_ssim(output_img_batch_rgb.astype(np.float32),
-                                                                net_output_img_example_rgb.astype(np.float32))
+        return ssim_map.mean(dim=(1, 2, 3)), cs
 
-                    psnr_avg += psnr_example
-                    ssim_avg += ssim_example
-                    
-                    print(examples)
-                    print(loss)
-                    if batch_num > 30:
-                        '''
-                        We save only the first 30 images down for time saving
-                        purposes
-                        '''
-                        continue
-                    else:
+    def compute_msssim(self, img1, img2):
+        """Computes the multi scale structural similarity index between two images. This function is differentiable.
+        Code adapted from: https://github.com/Po-Hsun-Su/pytorch-ssim/blob/master/pytorch_ssim/__init__.py
 
-                        output_img_example = (
-                            output_img_batch_rgb[0, 0:3, :, :] * 255).astype('uint8')
-                        net_output_img_example = (
-                            net_output_img_example_rgb[0, 0:3, :, :] * 255).astype('uint8')
+        :param img1: image Tensor BxCxHxW
+        :param img2: image Tensor BxCxHxW
+        :returns: mean SSIM
+        :rtype: float
 
-                        plt.imsave(out_dirpath + "/" + name[0].split(".")[0] + "_" + self.split_name.upper() + "_" + str(epoch + 1) + "_" + str(
-                            examples) + "_PSNR_" + str("{0:.3f}".format(psnr_example)) + "_SSIM_" + str(
-                            "{0:.3f}".format(ssim_example)) + ".jpg",
-                            ImageProcessing.swapimdims_3HW_HW3(net_output_img_example))
+        """
+        if img1.shape[2]!=img2.shape[2]:
+                img1=img1.transpose(2,3)
 
-                    del net_output_img_example_numpy
-                    del net_output_img_example_rgb
-                    del output_img_batch_rgb
-                    del output_img_batch_numpy
-                    del input_img_example
-                    del output_img_batch
+        if img1.shape != img2.shape:
+            raise RuntimeError('Input images must have the same shape (%s vs. %s).',
+                       img1.shape, img2.shape)
+        if img1.ndim != 4:
+            raise RuntimeError('Input images must have four dimensions, not %d',
+                       img1.ndim)
 
-        print(num_batches)
-        print(examples)
-        psnr_avg = psnr_avg / num_batches
-        ssim_avg = ssim_avg / num_batches
+        device = img1.device
+        ssims = []
+        mcs = []
+        for _ in range(self.levels):
+            ssim, cs = self.compute_ssim(img1, img2)
 
-        logging.info('loss_%s: %.5f psnr_%s: %.3f ssim_%s: %.3f' % (
-            self.split_name, (running_loss / examples), self.split_name, psnr_avg, self.split_name, ssim_avg))
+            # Relu normalize (not compliant with original definition)
+            ssims.append(ssim)
+            mcs.append(cs)
 
-        loss = (running_loss / examples)
+            img1 = F.avg_pool2d(img1, (2, 2))
+            img2 = F.avg_pool2d(img2, (2, 2))
 
-        return loss, psnr_avg, ssim_avg
+        ssims = torch.stack(ssims, dim=1)
+        mcs = torch.stack(mcs, dim=1)
+
+        # Simple normalize (not compliant with original definition)
+        # TODO: remove support for normalize == True (kept for backward support)
+        ssims = (ssims + 1) / 2
+        mcs = (mcs + 1) / 2
+
+        pow1 = mcs ** self.msssim_weights.reshape(1, self.msssim_weights.shape[0])
+        pow2 = ssims ** self.msssim_weights.reshape(1, self.msssim_weights.shape[0])
+
+        # From Matlab implementation https://ece.uwaterloo.ca/~z70wang/research/iwssim/
+        output = torch.prod(pow1[:, :-1] * pow2[:, -1].reshape(-1, 1), dim=1)
+        return output
+    
+    def forward(self, img1, img2):
+        return self.compute_msssim(img1, img2)
+

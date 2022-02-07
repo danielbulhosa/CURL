@@ -19,7 +19,7 @@ from abc import ABCMeta, abstractmethod
 from collections import defaultdict
 import logging
 import os
-import util
+import torchvision.transforms as trans
 import torchvision.transforms.functional as TF
 import random
 import matplotlib.pyplot as plt
@@ -27,67 +27,63 @@ from PIL import Image
 
 np.set_printoptions(threshold=sys.maxsize)
 
-class SamsungDataset(torch.utils.data.Dataset):
 
-    def __init__(self, data_dict, transform=None, normaliser=2 ** 8 - 1, is_valid=False):
-        """Initialisation for the Dataset object
-        :param data_dict: dictionary of dictionaries containing images
-        :param transform: PyTorch image transformations to apply to the images
-        :returns: N/A
-        :rtype: N/A
-        """
-        self.transform = transform
-        self.data_dict = data_dict
-        self.normaliser = normaliser # normaliser for groundtruth data
-        self.is_valid = is_valid
+def get_data_ids(img_ids_filepath):
+    with open(img_ids_filepath) as f:
+        '''
+        Load the image ids into a list data structure
+        '''
+        image_ids = f.readlines()
+        # you may also want to remove whitespace characters like `\n` at the end of each line
+        image_ids_list = [int(x.rstrip()) for x in image_ids if not x.startswith('.')]
 
-    def __len__(self):
-        """Returns the number of images in the dataset
-        :returns: number of images in the dataset
-        :rtype: Integer
-        """
-        return (len(self.data_dict.keys()))
+    return image_ids_list
 
-    def __getitem__(self, idx):
-        """Returns a pair of images with the given identifier. This is lazy loading
-        of data into memory. Only those image pairs needed for the current batch
-        are loaded.
-        :param idx: image pair identifier
-        :returns: dictionary containing input and output images and their identifier
-        :rtype: dictionary
-        """
-        while True:
 
-            if idx in self.data_dict:
+def get_data_dict(data_dirpath):
+    data_dirs = sorted(os.listdir(data_dirpath))
+    try: 
+        input_dir = [directory for directory in data_dirs if 'input' in directory][0]
+        output_dir = [directory for directory in data_dirs if 'output' in directory][0]
+        mask_dir = [directory for directory in data_dirs if 'mask' in directory][0]
+        logging.info("Using {} as input directory and {} as output directory.".format(input_dir, output_dir))
+    except IndexError:
+        raise OSError("{} must contain a directories containing the words 'input', 'output' respectively".format(data_dirpath))
 
-                output_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['output_img'], normaliser=self.normaliser)
-                input_img = np.load(self.data_dict[idx]['input_img'])
+    full_input_dir = data_dirpath + input_dir + os.path.sep
+    full_output_dir = data_dirpath + output_dir + os.path.sep
+    full_mask_dir = data_dirpath + mask_dir + os.path.sep
+        
+    input_imgs = [filename for filename in sorted(os.listdir(full_input_dir)) if not filename.startswith('.')]
+    output_imgs = [filename for filename in sorted(os.listdir(full_output_dir)) if not filename.startswith('.')]
+    masks = [filename for filename in sorted(os.listdir(full_mask_dir)) if not filename.startswith('.')]
+    
+    assert input_imgs == output_imgs, "Input and output image directories should have the same file names."
+    assert input_imgs == masks, "Input image and mask directories should have the same file names."
+    
+    idxs = [int(os.path.splitext(filename)[0]) for filename in input_imgs]
+    data_dict = {}
+    
+    for idx, input_img, output_img, mask in zip(idxs, input_imgs, output_imgs, masks):
+        data_dict[idx] = {'input_img': full_input_dir + input_img, 
+                          'output_img': full_output_dir + output_img,
+                          'mask': full_mask_dir + mask}
+        
+    return data_dict
 
-                input_img = input_img / (2**10-1)  # change this normalisation
-                                        # factor for your data
-                shape = input_img.shape
-                input_img = np.clip(input_img, 0, 1)
-                input_img[np.isnan(input_img)] = 0
 
-                seed = random.uniform(0, 10000)
+def filter_data_dict(data_dict, image_id_list):
+    filtered_dict = {}
+    for new_idx, idx in enumerate(image_id_list):
+         filtered_dict[new_idx] = data_dict[idx]
+    
+    return filtered_dict
 
-                if not self.is_valid:
-                    random.seed(seed)  # make a seed with numpy generation
-                    i = random.randint(0, input_img.shape[0]-512)  # patch size
-                                        # of 512 pixels
-                    j = random.randint(0, input_img.shape[1]-512)
-                    i = i-(i % 2)  # ensure on Bayer pattern boundary
-                    j = j-(j % 2)
-                    input_img = input_img[i:(i+512), j:(j+512)]
-                    output_img = output_img[i:(i+512), j:(j+512), :]
-
-                return {'input_img': input_img, 'output_img': output_img,
-                        'name': self.data_dict[idx]['input_img'].split("/")[-1]}
 
 class Dataset(torch.utils.data.Dataset):
 
-    def __init__(self, data_dict, transform=None, normaliser=2 ** 8 - 1, is_valid=False, is_inference=False):
+    def __init__(self, data_dict, normaliser=2 ** 8 - 1, 
+                 is_train=False, crop_h=256, crop_w=256):
         """Initialisation for the Dataset object
 
         :param data_dict: dictionary of dictionaries containing images
@@ -96,11 +92,25 @@ class Dataset(torch.utils.data.Dataset):
         :rtype: N/A
 
         """
-        self.transform = transform
         self.data_dict = data_dict
         self.normaliser = normaliser
-        self.is_valid = is_valid
-        self.is_inference = is_inference
+        self.is_train = is_train
+        self.crop_h, self.crop_w = crop_h, crop_w
+        
+        
+        if self.is_train:
+            self.cropper = trans.RandomCrop((self.crop_h, self.crop_w),
+                                             pad_if_needed=True,
+                                             fill=0,
+                                             padding_mode='constant'
+                                            )
+        else:
+            self.cropper = trans.CenterCrop((self.crop_h, self.crop_w))
+            
+        self.rotator = trans.RandomRotation(180, expand=False, fill=0)
+        self.hflipper = trans.RandomHorizontalFlip(0.5)
+        self.vflipper = trans.RandomVerticalFlip(0.5)
+        self.transforms = [self.hflipper, self.vflipper, self.rotator]
 
     def __len__(self):
         """Returns the number of images in the dataset
@@ -110,6 +120,53 @@ class Dataset(torch.utils.data.Dataset):
 
         """
         return (len(self.data_dict.keys()))
+    
+    @staticmethod
+    def load_image(img_filepath, normaliser, mono=False):
+        """Loads an image from file as a numpy multi-dimensional array
+
+        :param img_filepath: filepath to the image
+        :returns: image as a multi-dimensional numpy array
+        :rtype: multi-dimensional numpy array
+
+        """
+        img = Image.open(img_filepath)
+        img = img.convert('1') if mono else img # Make image b&w
+        img = Dataset.normalise_image(np.array(img), normaliser)  # NB: imread normalises to 0-1
+        return img
+
+    @staticmethod
+    def normalise_image(img, normaliser):
+        """Normalises image data to be a float between 0 and 1
+
+        :param img: Image as a numpy multi-dimensional image array
+        :returns: Normalised image as a numpy multi-dimensional image array
+        :rtype: Numpy array
+
+        """
+        img = img.astype('float32') / normaliser
+        return img
+    
+    def transform(self, input_img, output_img, mask):
+        # Stacking guarantees the same transform is applied to all images
+        mask = mask.reshape(mask.shape[0], mask.shape[1], 1)
+        in_out_mask_stack = np.concatenate([input_img, output_img, mask], axis=2)
+        
+        if self.normaliser==1:
+            in_out_mask_stack = in_out_mask_stack.astype(np.uint8)
+
+        in_out_mask_stack = TF.to_tensor(in_out_mask_stack)
+        in_out_mask_stack = self.cropper(in_out_mask_stack)
+
+        if self.is_train:
+            for transform in self.transforms:
+                in_out_mask_stack = transform(in_out_mask_stack)
+        
+        
+        input_img, output_img, mask = in_out_mask_stack[:3], \
+                                      in_out_mask_stack[3:6], \
+                                      in_out_mask_stack[6:7]
+        return input_img, output_img, mask
 
     def __getitem__(self, idx):
         """Returns a pair of images with the given identifier. This is lazy loading
@@ -121,315 +178,16 @@ class Dataset(torch.utils.data.Dataset):
         :rtype: dictionary
 
         """
-        while True:
 
-            if (self.is_inference) or (self.is_valid):
-
-                input_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['input_img'], normaliser=self.normaliser)
-                output_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['output_img'], normaliser=self.normaliser)
-
-                if self.normaliser==1:
-                    input_img = input_img.astype(np.uint8)
-                    output_img = output_img.astype(np.uint8)
-
-                input_img = TF.to_pil_image(input_img)
-                input_img = TF.to_tensor(input_img)
-                output_img = TF.to_pil_image(output_img)
-                output_img = TF.to_tensor(output_img)
-
-                if input_img.shape[1]==output_img.shape[2]:
-                    output_img=output_img.permute(0,2,1)
-
-                return {'input_img': input_img, 'output_img': output_img,
-                        'name': self.data_dict[idx]['input_img'].split("/")[-1]}
-
-            else:
-
-                output_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['output_img'], normaliser=self.normaliser)
-                input_img = util.ImageProcessing.load_image(
-                    self.data_dict[idx]['input_img'], normaliser=self.normaliser)
-
-                if self.normaliser==1:
-                    input_img = input_img.astype(np.uint8)
-                    output_img = output_img.astype(np.uint8)
-
-                input_img = TF.to_pil_image(input_img)
-                output_img = TF.to_pil_image(output_img)
-      
-                if not self.is_valid:
-                        
-                        # Random horizontal flipping
-                        if random.random() > 0.5:
-                            input_img = TF.hflip(input_img)
-                            output_img = TF.hflip(output_img)
-
-                        # Random vertical flipping
-                        if random.random() > 0.5:
-                            input_img = TF.vflip(input_img)
-                            output_img = TF.vflip(output_img)
-
-                        # Random rotation +90
-                        if random.random() > 0.5:
-                            input_img=TF.rotate(input_img,90,expand=True)
-                            output_img=TF.rotate(output_img,90,expand=True)
-                            #input_img.save("./"+self.data_dict[idx]['input_img'].split("/")[-1]+"1.png")
-                            #output_img.save("./"+self.data_dict[idx]['output_img'].split("/")[-1]+"2.png")
-
-                        # Random rotation -90
-                        if random.random() > 0.5:
-                            input_img=TF.rotate(input_img,-90, expand=True)
-                            output_img=TF.rotate(output_img,-90, expand=True)
-
-                        # Random rotation -90
-                        if random.random() > 0.5:
-                            input_img=TF.rotate(input_img, 180, expand=True)
-                            output_img=TF.rotate(output_img, 180, expand=True)
-
-                        #output_img.save("./"+self.data_dict[idx]['output_img'].split("/")[-1]+"2.png")
-              
-                # Transform to tensor
-                #print(output_img.shape)
-                #plt.imsave("./"+self.data_dict[idx]['input_img'].split("/")[-1]+".png", output_img,format='png')
-                input_img = TF.to_tensor(input_img)
-                output_img = TF.to_tensor(output_img)
-                
-                return {'input_img': input_img, 'output_img': output_img,
-                        'name': self.data_dict[idx]['input_img'].split("/")[-1]}
-
-
-class DataLoader():
-
-    def __init__(self, data_dirpath, img_ids_filepath):
-        """Initialisation function for the data loader
-
-        :param data_dirpath: directory containing the data
-        :param img_ids_filepath: file containing the ids of the images to load
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        self.data_dirpath = data_dirpath
-        self.img_ids_filepath = img_ids_filepath
-
-    @abstractmethod
-    def load_data(self):
-        """Abstract function for the data loader class
-
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        pass
-
-    @abstractmethod
-    def perform_inference(self, net, data_dirpath):
-        """Abstract function for the data loader class
-
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        pass
-
-
-class Adobe5kDataLoader(DataLoader):
-
-    def __init__(self, data_dirpath, img_ids_filepath):
-        """Initialisation function for the data loader
-
-        :param data_dirpath: directory containing the data
-        :param img_ids_filepath: file containing the ids of the images to load
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        super().__init__(data_dirpath, img_ids_filepath)
-        self.data_dict = defaultdict(dict)
-
-    def load_data(self):
-        """ Loads the Samsung image data into a Python dictionary
-
-        :returns: Python two-level dictionary containing the images
-        :rtype: Dictionary of dictionaries
-
-        """
-
-        logging.info("Loading Adobe5k dataset ...")
-
-        with open(self.img_ids_filepath) as f:
-            '''
-            Load the image ids into a list data structure
-            '''
-            image_ids = f.readlines()
-            # you may also want to remove whitespace characters like `\n` at the end of each line
-            image_ids_list = [x.rstrip() for x in image_ids]
-
-        idx = 0
-        idx_tmp = 0
-        img_id_to_idx_dict = {}
-
-        for root, dirs, files in os.walk(self.data_dirpath):
-
-            for file in files:
-
-                img_id = file.split("-")[0]
-
-                is_id_in_list = False
-                for img_id_test in image_ids_list:
-                    if img_id_test == img_id:
-                        is_id_in_list = True
-                        break
-
-                if is_id_in_list:  # check that the image is a member of the appropriate training/test/validation split
-
-                    if not img_id in img_id_to_idx_dict.keys():
-                        img_id_to_idx_dict[img_id] = idx
-                        self.data_dict[idx] = {}
-                        self.data_dict[idx]['input_img'] = None
-                        self.data_dict[idx]['output_img'] = None
-                        idx_tmp = idx
-                        idx += 1
-                    else:
-                        idx_tmp = img_id_to_idx_dict[img_id]
-
-                    if "input" in root:  # change this to the name of your
-                                        # input data folder
-
-                        input_img_filepath = file
-
-                        self.data_dict[idx_tmp]['input_img'] = root + \
-                            "/" + input_img_filepath
-
-                    elif ("output" in root):  # change this to the name of your
-                                             # output data folder
-
-                        output_img_filepath = file
-
-                        self.data_dict[idx_tmp]['output_img'] = root + \
-                            "/" + output_img_filepath
-
-                else:
-
-                    logging.debug("Excluding file with id: " + str(img_id))
-
-        for idx, imgs in self.data_dict.items():
-            assert ('input_img' in imgs)
-            assert ('output_img' in imgs)
-
-        return self.data_dict
-
-'''
-This data loading class only works for the Samsung S7 dataset. You will need to
-edit this class to handle a new dataset.
-'''
-class SamsungDataLoader(DataLoader):
-
-    def __init__(self, data_dirpath, img_ids_filepath):
-        """Initialisation function for the data loader
-
-        :param data_dirpath: directory containing the data
-        :param img_ids_filepath: file containing the ids of the images to load
-        :returns: N/A
-        :rtype: N/A
-
-        """
-        super().__init__(data_dirpath, img_ids_filepath)
-        self.data_dict = defaultdict(dict)
-
-    def load_data(self):
-        """ Loads the Samsung image data into a Python dictionary
-
-        :returns: Python two-level dictionary containing the images
-        :rtype: Dictionary of dictionaries 
-
-        """
-
-        logging.info("Loading Samsung dataset ...")
-
-        with open(self.img_ids_filepath) as f:
-            '''
-            Load the image ids into a list data structure
-            '''
-            image_ids = f.readlines()
-            # you may also want to remove whitespace characters like `\n` at the end of each line
-            image_ids_list = [x.rstrip() for x in image_ids]
-
-        idx = 0
-        idx_tmp = 0
-        img_id_to_idx_dict = {}
-
-        for root, dirs, files in os.walk(self.data_dirpath):
-
-            for file in files:
-
-                if "medium" in file:
-                    img_id = file.split("-medium")[0]
-                else:
-                    img_id = file.split("-short")[0]
-
-                is_id_in_list = False
-                for img_id_test in image_ids_list:
-                    if img_id_test == img_id:
-                        is_id_in_list = True
-                        break
-
-                if is_id_in_list:   # check that the image is a member of the appropriate training/test/validation split
-
-                    if not img_id in img_id_to_idx_dict.keys():
-                        img_id_to_idx_dict[img_id] = idx
-                        self.data_dict[idx] = {}
-                        self.data_dict[idx]['input_img'] = None
-                        self.data_dict[idx]['output_img'] = None
-                        idx_tmp = idx
-                        idx += 1
-                    else:
-                        idx_tmp = img_id_to_idx_dict[img_id]
-
-                    if "medium_input" in root:  # change medium_input to match
-                                        # name of your data input subdirectory
-
-                        input_img_filepath = file
-
-                        if file.endswith(".dng"):
-
-                            if not os.path.isfile(root+"/"+input_img_filepath.split(".")[0]+".npy"):
-
-                                raw_img = rawpy.imread(
-                                    root+"/"+input_img_filepath)
-                                np.save(root+"/"+input_img_filepath.split(".")
-                                        [0]+".npy", raw_img.raw_image)
-
-                        self.data_dict[idx_tmp]['input_img'] = root + \
-                            "/"+input_img_filepath.split(".")[0]+".npy"
-
-                    elif ("output" in root):  # change output to match name of
-                                        # your data groundtruth subdirectory
-
-                        if (file.endswith(".jpg")) and (not file.endswith(".proc.jpg")):
-                            '''
-                            The target images are rgb format.
-                            '''
-                            output_img_filepath = root + "/" + file
-
-                            if not os.path.isfile(output_img_filepath+".proc.jpg"):
-
-                                output_img = ImageProcessing.load_image(
-                                     output_img_filepath, normaliser=2**8-1)
-                                plt.imsave(output_img_filepath +
-                                           ".proc.jpg", output_img)
-
-                            self.data_dict[idx_tmp]['output_img'] = output_img_filepath+".proc.jpg"
-
-                else:
-
-                    logging.debug("Excluding file with id: " + str(img_id))
-
-        for idx, imgs in self.data_dict.items():
-
-            assert('input_img' in imgs)
-            assert('output_img' in imgs)
-
-        return self.data_dict
+        input_img = Dataset.load_image(
+            self.data_dict[idx]['input_img'], normaliser=self.normaliser)
+        output_img = Dataset.load_image(
+            self.data_dict[idx]['output_img'], normaliser=self.normaliser)
+        mask = Dataset.load_image(
+            self.data_dict[idx]['mask'], normaliser=self.normaliser, mono=True)
+        
+        input_img, output_img, mask = self.transform(input_img, output_img, mask)
+        mask = (mask > 0)
+
+        return {'input_img': input_img, 'output_img': output_img, 'mask': mask,
+                'name': self.data_dict[idx]['input_img'].split("/")[-1]}
