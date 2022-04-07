@@ -280,7 +280,8 @@ def main():
                                                             data['output_img'].to(device, non_blocking=True), \
                                                             data['mask'].to(device, non_blocking=True)
                 
-                net_img_batch = net(input_img_batch, mask_batch)
+                R, L, H = net(input_img_batch, mask_batch)
+                net_img_batch = net.generate_image(input_img_batch, R, L, H)
                 # Calculate loss, leaving out masked pixels
                 loss = criterion(net_img_batch, gt_img_batch, mask_batch)
                 optimizer.zero_grad()

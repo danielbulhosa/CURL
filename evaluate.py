@@ -98,7 +98,8 @@ class Evaluator():
                     Variable(data['mask'], requires_grad=False).to(device, non_blocking=True), \
                     data['name']
                 
-                net_output_img_batch = net(input_img_batch, mask_batch)
+                R, L, H = net(input_img_batch, mask_batch)
+                net_output_img_batch = net.generate_image(input_img_batch, R, L, H)
                 loss = self.criterion(net_output_img_batch, output_img_batch, mask_batch)
                 psnr = self.psnr(output_img_batch, net_output_img_batch, mask_batch)
                 msssim = self.msssim(output_img_batch * mask_batch, 

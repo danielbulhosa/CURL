@@ -41,8 +41,8 @@ def infer():
     mask_tensor = (mask_tensor > 0).type(torch.FloatTensor)
 
     # Take output image, apply mask, turn background white like in app
-    residual = net(img_tensor, mask_tensor, timg_tensor)
-    out_img = net.generate_image(timg_tensor, residual)
+    R, L, H = net(img_tensor, mask_tensor)
+    out_img = net.generate_image(timg_tensor, R, L, H)
     output_tensor = out_img * tmask_tensor + (1 - tmask_tensor)
     TF.to_pil_image(output_tensor[0]).save(args.out_path)
 
