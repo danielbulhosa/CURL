@@ -415,6 +415,37 @@ class Deg4MobilePolyLayer(nn.Module):
                 torch.unsqueeze(poly_terms, dim=1)).sum(dim=-1)
 
 
+class ForLoopChannelPolyLayer(ChannelPolyLayer):
+    """
+    Implemented to try doing for loop in mobile converted model to avoid
+    memory issue. Tried scripting this, composing with TriSpaceRegNet, and
+    then tracing full model. We get an error when converting to coremltools,
+    it does not seem to like this layer.
+    """
+
+    def __init__(self, degree=3, num_variables=3, num_out=None):
+        super(ForLoopChannelPolyLayer, self).__init__(degree=degree, num_variables=num_variables, num_out=num_out)
+
+    def forward(self, img, coeffs):
+        assert img.shape[1] == self.powers.shape[1], "Must have a power for each input image channel"
+
+        ret = torch.zeros((img.shape[0], self.num_out, img.shape[2], img.shape[3]))
+        coeff_indices = torch.range(0, self.num_coeffs - 1, dtype=torch.int)
+        pow_indices = torch.range(0, self.num_variables - 1, dtype=torch.int)
+
+        for coeff_channel in torch.range(0, coeffs.shape[1] - 1, dtype=torch.int):
+            term = torch.zeros(img[:, 0].shape)
+            for coeff_index, power_list in zip(coeff_indices, self.powers):
+                # Coeff value across batch
+                index_coeff = coeffs[:, coeff_channel, coeff_index]
+                for power_index, power in zip(pow_indices, power_list):
+                    term += img[:, power_index]**power
+                term *= index_coeff
+            ret[:, coeff_channel] += term
+
+        return ret
+
+
 class PolyRegNet(nn.Module):
     
     def __init__(self, num_channels=3, polynomial_order=4):
